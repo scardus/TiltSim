@@ -14,7 +14,7 @@ struct BeaconConfig {
 constexpr BeaconConfig kBeacons[] = {
   {"a495bb10-c5b1-4b44-b512-1370f02d74de", 64, 1051, true},   // Red
   {"a495bb20-c5b1-4b44-b512-1370f02d74de", 66, 1052, true},   // Green
-  {"a495bb30-c5b1-4b44-b512-1370f02d74de", 68, 1053, true},   // Black
+  {"a495bb30-c5b1-4b44-b512-1370f02d74de", 680, 10530, true},   // Black (pro)
   {"a495bb40-c5b1-4b44-b512-1370f02d74de", 69, 1054, false},   // Purple
   {"a495bb50-c5b1-4b44-b512-1370f02d74de", 71, 1055, false},   // Orange
   {"a495bb60-c5b1-4b44-b512-1370f02d74de", 73, 1056, false},   // Blue
@@ -83,9 +83,6 @@ uint16_t encodeMajorDegFWithVariance(const int baseMajorDegF, const int variance
   const int adjusted = baseMajorDegF + varianceDegF;
   if (adjusted < 0) {
     return 0;
-  }
-  if (adjusted > 99) {
-    return 99;
   }
   return static_cast<uint16_t>(adjusted);
 }
