@@ -3,6 +3,8 @@
 #include <BLEBeacon.h>
 #include <BLEDevice.h>
 
+#include "tilt_encoding.h"
+
 namespace {
 struct BeaconConfig {
   const char* uuid;
@@ -34,51 +36,6 @@ bool gRunActive = false;
 size_t gCurrentBeaconIndex = 0;
 int gRunVarianceDegF = 0;
 
-bool isHexChar(const char c) {
-  return (c >= '0' && c <= '9') || (c >= 'A' && c <= 'F') ||
-         (c >= 'a' && c <= 'f');
-}
-
-String canonicalToBleBeaconUuidInput(const char* canonicalUuid) {
-  String hexOnly;
-  hexOnly.reserve(32);
-
-  for (size_t i = 0; canonicalUuid[i] != '\0'; ++i) {
-    const char c = canonicalUuid[i];
-    if (c == '-') {
-      continue;
-    }
-    if (!isHexChar(c)) {
-      return "";
-    }
-    hexOnly += static_cast<char>(toupper(static_cast<unsigned char>(c)));
-  }
-
-  if (hexOnly.length() != 32) {
-    return "";
-  }
-
-  // BLEBeacon helper expects UUID bytes in reverse order for iBeacon payloads.
-  String reversedBytes;
-  reversedBytes.reserve(32);
-  for (int i = 30; i >= 0; i -= 2) {
-    reversedBytes += hexOnly.substring(i, i + 2);
-  }
-
-  String formatted;
-  formatted.reserve(36);
-  formatted += reversedBytes.substring(0, 8);
-  formatted += "-";
-  formatted += reversedBytes.substring(8, 12);
-  formatted += "-";
-  formatted += reversedBytes.substring(12, 16);
-  formatted += "-";
-  formatted += reversedBytes.substring(16, 20);
-  formatted += "-";
-  formatted += reversedBytes.substring(20, 32);
-  return formatted;
-}
-
 uint16_t encodeMajorDegFWithVariance(const int baseMajorDegF, const int varianceDegF) {
   const int adjusted = baseMajorDegF + varianceDegF;
   if (adjusted < 0) {
@@ -106,8 +63,8 @@ void startBeaconAdvertisement(const size_t beaconIndex) {
 
   const BeaconConfig& cfg = kBeacons[beaconIndex];
   const char* canonicalUuid = cfg.uuid;
-  const String beaconUuid = canonicalToBleBeaconUuidInput(canonicalUuid);
-  if (beaconUuid.isEmpty()) {
+  const std::string beaconUuid = canonicalToBleBeaconUuidInput(canonicalUuid);
+  if (beaconUuid.empty()) {
     Serial.print("Invalid UUID: ");
     Serial.println(canonicalUuid);
     return;
@@ -117,7 +74,7 @@ void startBeaconAdvertisement(const size_t beaconIndex) {
 
   BLEBeacon beacon;
   beacon.setManufacturerId(0x004C); // Apple company identifier for iBeacon format
-  beacon.setProximityUUID(BLEUUID(beaconUuid.c_str()));
+  beacon.setProximityUUID(BLEUUID(beaconUuid));
   beacon.setMajor(major);
   beacon.setMinor(cfg.minor);
   beacon.setSignalPower(kMeasuredPower);
