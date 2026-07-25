@@ -15,7 +15,7 @@ over the same page.
 2. On first boot the device raises a WiFi access point named
    `tiltsim-<chipid>`. Join it and pick your network in the captive portal.
    Credentials are stored on the device, not in this repo.
-3. Open **http://tiltsim-&lt;chipid&gt;.local** — the serial log prints the exact
+3. Open **http://tiltsim-chipid.local** — the serial log prints the exact
    name at 115200 baud.
 
 If the saved network is unreachable the portal reappears for three minutes,
