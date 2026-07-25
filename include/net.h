@@ -1,0 +1,21 @@
+#pragma once
+
+#include <Arduino.h>
+
+// Derived from the eFuse MAC, so it is stable for the life of the board:
+// "tiltsim-a1b2c3".
+const String& netHostname();
+
+// Joins the saved network, or raises a captive portal named after the host so
+// credentials can be entered. Returns false if it gave up and the device is
+// running offline - BLE advertising still works in that state.
+bool netBegin();
+
+// Handles reconnects. Call from loop().
+void netLoop();
+
+bool netIsConnected();
+String netIpAddress();
+
+// Forgets the saved credentials and reboots into the captive portal.
+void netForgetCredentials();

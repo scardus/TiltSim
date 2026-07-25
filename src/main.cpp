@@ -3,6 +3,7 @@
 #include <BLEBeacon.h>
 #include <BLEDevice.h>
 
+#include "net.h"
 #include "tilt_config.h"
 #include "tilt_encoding.h"
 #include "version.h"
@@ -126,6 +127,10 @@ void setup() {
   configBegin();
   configPrint();
 
+  // Before BLE: the captive portal blocks, and there is no point holding the
+  // BLE stack's memory while it does.
+  netBegin();
+
   BLEDevice::init("ESP32-iBeacon");
   gAdvertising = BLEDevice::getAdvertising();
   gAdvertising->setScanResponse(false);
@@ -138,6 +143,7 @@ void loop() {
   const unsigned long now = millis();
 
   configFlushIfDue();
+  netLoop();
 
   // End the current slot, then either start the next one or fall quiet for the
   // rest of the cycle.
