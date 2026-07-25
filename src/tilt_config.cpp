@@ -93,6 +93,7 @@ void configBegin() {
   if (!prefs.begin(kPrefsNamespace, true)) {
     Serial.println("Config: no stored settings, using defaults");
     applyDefaults();
+    configMarkDirty();
     return;
   }
 

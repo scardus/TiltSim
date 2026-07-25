@@ -5,79 +5,85 @@
 
 #include "tilt_config.h"
 #include "tilt_encoding.h"
+#include "version.h"
 
 namespace {
-struct BeaconConfig {
-  const char* uuid;
-  int baseMajorDegF;
-  uint16_t minor;
-  bool active;
-};
-
-constexpr BeaconConfig kBeacons[] = {
-  {"a495bb10-c5b1-4b44-b512-1370f02d74de", 64, 1051, true},   // Red
-  {"a495bb20-c5b1-4b44-b512-1370f02d74de", 66, 1052, true},   // Green
-  {"a495bb30-c5b1-4b44-b512-1370f02d74de", 680, 10530, true},   // Black (pro)
-  {"a495bb40-c5b1-4b44-b512-1370f02d74de", 69, 1054, false},   // Purple
-  {"a495bb50-c5b1-4b44-b512-1370f02d74de", 71, 1055, false},   // Orange
-  {"a495bb60-c5b1-4b44-b512-1370f02d74de", 73, 1056, false},   // Blue
-  {"a495bb70-c5b1-4b44-b512-1370f02d74de", 75, 1057, false},   // Yellow
-  {"a495bb80-c5b1-4b44-b512-1370f02d74de", 77, 1058, false},   // Pink
-};
-
 constexpr int8_t kMeasuredPower = -10;
-constexpr unsigned long kRunPeriodMs = 5000;
-constexpr unsigned long kAdvertiseWindowMs = 1000;
 
 BLEAdvertising* gAdvertising = nullptr;
-unsigned long gLastRunMs = 0;
-unsigned long gAdvertiseStartMs = 0;
+unsigned long gCycleStartMs = 0;
+unsigned long gSliceStartMs = 0;
+unsigned long gSliceMs = 0;
+unsigned long gCycleLengthMs = kCyclePeriodMs;
+size_t gSlotIndex = 0;
 bool gIsAdvertising = false;
-bool gRunActive = false;
-size_t gCurrentBeaconIndex = 0;
-int gRunVarianceDegF = 0;
 
-uint16_t encodeMajorDegFWithVariance(const int baseMajorDegF, const int varianceDegF) {
-  const int adjusted = baseMajorDegF + varianceDegF;
-  if (adjusted < 0) {
-    return 0;
+// The colours enabled for the current cycle, snapshotted at cycle start so a
+// web edit mid-cycle cannot reshuffle the slots underneath us.
+size_t gSchedule[kTiltCount];
+size_t gScheduleCount = 0;
+
+float randomOffset(const float range) {
+  if (range <= 0.0f) {
+    return 0.0f;
   }
-  return static_cast<uint16_t>(adjusted);
+  // random() is integer-only, so work in thousandths of the range.
+  const long steps = random(-1000, 1001);
+  return range * (static_cast<float>(steps) / 1000.0f);
 }
 
-size_t findNextActiveBeaconIndex(const size_t startIndex) {
-  const size_t beaconCount = sizeof(kBeacons) / sizeof(kBeacons[0]);
-  for (size_t i = startIndex; i < beaconCount; ++i) {
-    if (kBeacons[i].active) {
-      return i;
+void buildSchedule() {
+  gScheduleCount = 0;
+  if (!configLock()) {
+    return;
+  }
+  if (gConfig.masterEnabled) {
+    for (size_t i = 0; i < kTiltCount; ++i) {
+      if (gConfig.tilts[i].enabled) {
+        gSchedule[gScheduleCount++] = i;
+      }
     }
   }
-  return beaconCount;
-}
+  configUnlock();
+
+  gSliceMs = sliceDurationMs(gScheduleCount);
+  // BLE Core Spec advDelay: a pseudo-random 0-10 ms is added to each
+  // advertising event. The controller already does this between packets within
+  // a slice; this covers the cycle boundary so the simulator does not sit on a
+  // suspiciously exact 5000 ms period.
+  gCycleLengthMs = kCyclePeriodMs + random(0, kAdvDelayMaxMs + 1);
 }
 
-void startBeaconAdvertisement(const size_t beaconIndex) {
-  const size_t beaconCount = sizeof(kBeacons) / sizeof(kBeacons[0]);
-  if (beaconCount == 0 || beaconIndex >= beaconCount) {
-    return;
+bool startSlot(const size_t slotIndex) {
+  if (slotIndex >= gScheduleCount) {
+    return false;
   }
+  const size_t colourIndex = gSchedule[slotIndex];
 
-  const BeaconConfig& cfg = kBeacons[beaconIndex];
-  const char* canonicalUuid = cfg.uuid;
-  const std::string beaconUuid = canonicalToBleBeaconUuidInput(canonicalUuid);
+  if (!configLock()) {
+    return false;
+  }
+  const TiltSettings tilt = gConfig.tilts[colourIndex];
+  configUnlock();
+
+  const std::string beaconUuid =
+      canonicalToBleBeaconUuidInput(kTiltColours[colourIndex].uuid);
   if (beaconUuid.empty()) {
-    Serial.print("Invalid UUID: ");
-    Serial.println(canonicalUuid);
-    return;
+    Serial.print("Invalid UUID for ");
+    Serial.println(kTiltColours[colourIndex].name);
+    return false;
   }
 
-  const uint16_t major = encodeMajorDegFWithVariance(cfg.baseMajorDegF, gRunVarianceDegF);
+  const uint16_t major =
+      encodeTemperature(tilt.tempF, randomOffset(tilt.tempVarianceF), tilt.pro);
+  const uint16_t minor =
+      encodeGravity(tilt.gravity, randomOffset(tilt.gravityVariance), tilt.pro);
 
   BLEBeacon beacon;
   beacon.setManufacturerId(0x004C); // Apple company identifier for iBeacon format
   beacon.setProximityUUID(BLEUUID(beaconUuid));
   beacon.setMajor(major);
-  beacon.setMinor(cfg.minor);
+  beacon.setMinor(minor);
   beacon.setSignalPower(kMeasuredPower);
 
   BLEAdvertisementData advData;
@@ -86,69 +92,65 @@ void startBeaconAdvertisement(const size_t beaconIndex) {
 
   gAdvertising->setAdvertisementData(advData);
   gAdvertising->start();
-  gAdvertiseStartMs = millis();
+  gSliceStartMs = millis();
   gIsAdvertising = true;
 
-  Serial.print("iBeacon advertising started for UUID: ");
-  Serial.println(canonicalUuid);
-  Serial.print("  major(degF): ");
-  Serial.println(major);
-  Serial.print("  minor(gravity): ");
-  Serial.println(cfg.minor);
+  Serial.printf("%-6s %s major=%u minor=%u\n", kTiltColours[colourIndex].name,
+                tilt.pro ? "pro" : "std", major, minor);
+  return true;
 }
 
-void stopIBeaconAdvertisement() {
+// Advances to the next slot that actually airs, so one bad slot does not stall
+// the remainder of the cycle.
+void startNextUsableSlot() {
+  while (gSlotIndex < gScheduleCount && !startSlot(gSlotIndex)) {
+    ++gSlotIndex;
+  }
+}
+
+void stopSlot() {
+  if (!gIsAdvertising) {
+    return;
+  }
   gAdvertising->stop();
   gIsAdvertising = false;
-  Serial.println("iBeacon advertising stopped");
 }
+}  // namespace
 
 void setup() {
   Serial.begin(115200);
   randomSeed(static_cast<unsigned long>(micros()));
+
+  Serial.printf("\n%s %s (%s)\n", FW_NAME, FW_VERSION, FW_BUILD_DATE);
+
   configBegin();
   configPrint();
+
   BLEDevice::init("ESP32-iBeacon");
   gAdvertising = BLEDevice::getAdvertising();
   gAdvertising->setScanResponse(false);
 
-  // Trigger the first run immediately after boot.
-  gLastRunMs = millis() - kRunPeriodMs;
+  // Trigger the first cycle immediately after boot.
+  gCycleStartMs = millis() - kCyclePeriodMs;
 }
 
 void loop() {
   const unsigned long now = millis();
-  const size_t beaconCount = sizeof(kBeacons) / sizeof(kBeacons[0]);
 
   configFlushIfDue();
 
-  if (!gRunActive && !gIsAdvertising && (now - gLastRunMs >= kRunPeriodMs)) {
-    gRunVarianceDegF = random(-2, 3);
-    gRunActive = true;
-    gCurrentBeaconIndex = findNextActiveBeaconIndex(0);
-    Serial.print("Starting run with variance (degF): ");
-    Serial.println(gRunVarianceDegF);
-    if (gCurrentBeaconIndex < beaconCount) {
-      startBeaconAdvertisement(gCurrentBeaconIndex);
-    } else {
-      gRunActive = false;
-      gLastRunMs = millis();
-      Serial.println("No active beacons; run skipped");
-    }
+  // End the current slot, then either start the next one or fall quiet for the
+  // rest of the cycle.
+  if (gIsAdvertising && (now - gSliceStartMs >= gSliceMs)) {
+    stopSlot();
+    ++gSlotIndex;
+    startNextUsableSlot();
   }
 
-  if (gIsAdvertising && (now - gAdvertiseStartMs >= kAdvertiseWindowMs)) {
-    stopIBeaconAdvertisement();
-
-    if (gRunActive) {
-      gCurrentBeaconIndex = findNextActiveBeaconIndex(gCurrentBeaconIndex + 1);
-      if (gCurrentBeaconIndex < beaconCount) {
-        startBeaconAdvertisement(gCurrentBeaconIndex);
-      } else {
-        gRunActive = false;
-        gLastRunMs = millis();
-        Serial.println("Run complete");
-      }
-    }
+  if (!gIsAdvertising && (now - gCycleStartMs >= gCycleLengthMs)) {
+    gCycleStartMs = now;
+    buildSchedule();
+    gSlotIndex = 0;
+    startNextUsableSlot();
   }
 }
