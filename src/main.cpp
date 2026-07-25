@@ -147,6 +147,13 @@ void loop() {
 
   configFlushIfDue();
   netLoop();
+  webServerLoop();
+
+  // Leave the radio and CPU to the upload; it reboots when it finishes.
+  if (webOtaInProgress()) {
+    stopSlot();
+    return;
+  }
 
   // End the current slot, then either start the next one or fall quiet for the
   // rest of the cycle.

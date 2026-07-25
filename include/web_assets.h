@@ -96,6 +96,82 @@ const char kIndexHtml[] PROGMEM = R"HTML(
 <script src="/app.js"></script></body></html>
 )HTML";
 
+const char kOtaHtml[] PROGMEM = R"HTML(
+<!doctype html><html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Firmware · Tilt Simulator</title><link rel="stylesheet" href="/style.css">
+<style>
+.panel{background:var(--card);border:1px solid var(--line);
+border-radius:var(--radius);padding:20px;max-width:540px;margin:0 auto}
+.panel p{color:var(--muted);font-size:14px}
+#bar{height:10px;background:var(--card2);border-radius:6px;overflow:hidden;
+margin:16px 0 8px;display:none}
+#fill{height:100%;width:0;background:var(--accent);transition:width .2s}
+#pct{font-size:13px;color:var(--muted);text-align:center;min-height:20px}
+input[type=file]{width:100%;background:var(--card2);border:1px solid var(--line);
+border-radius:8px;padding:10px;color:var(--fg);margin-bottom:14px}
+#go{width:100%;padding:11px;font-size:15px}
+.msg{margin-top:14px;padding:11px;border-radius:8px;font-size:14px;display:none}
+.msg.ok{display:block;background:rgba(58,166,85,.15);color:#8ee0a1;
+border:1px solid var(--ok)}
+.msg.bad{display:block;background:rgba(232,52,46,.15);color:#ffa8a4;
+border:1px solid var(--bad)}
+</style></head><body><div class="wrap">
+<header>
+  <div><h1>Firmware update</h1><div class="host" id="host">…</div></div>
+  <nav><a class="btn" href="/">Back to tilts</a></nav>
+</header>
+<div class="panel">
+  <p>Upload a <code>firmware.bin</code> built for this board. Advertising stops
+  during the upload and the device reboots when it finishes. Do not remove
+  power while it is writing.</p>
+  <input type="file" id="file" accept=".bin">
+  <button class="btn" id="go">Upload and install</button>
+  <div id="bar"><div id="fill"></div></div>
+  <div id="pct"></div>
+  <div class="msg" id="msg"></div>
+</div>
+<footer id="foot"></footer>
+</div>
+<script>
+const $=i=>document.getElementById(i);
+fetch('/api/state').then(r=>r.json()).then(s=>{
+  $('host').textContent=s.hostname+'.local · '+s.ip;
+  $('foot').textContent=s.name+' v'+s.version+' · built '+s.built
+    +' · slot '+s.partition+' · '+s.sketchMd5.slice(0,8);
+}).catch(()=>{});
+
+function say(t,bad){const m=$('msg');m.textContent=t;m.className='msg '+(bad?'bad':'ok');}
+
+$('go').addEventListener('click',()=>{
+  const f=$('file').files[0];
+  if(!f){say('Choose a .bin file first',1);return;}
+  $('go').disabled=true;$('bar').style.display='block';
+  const fd=new FormData();fd.append('update',f);
+  const x=new XMLHttpRequest();
+  x.upload.onprogress=e=>{
+    if(!e.lengthComputable)return;
+    const p=Math.round(e.loaded/e.total*100);
+    $('fill').style.width=p+'%';$('pct').textContent=p+'%';
+  };
+  x.onload=()=>{
+    if(x.status===200){
+      say('Installed. Rebooting…');
+      let n=12;
+      const t=setInterval(()=>{
+        say('Installed. Reloading in '+(--n)+'s…');
+        if(n<=0){clearInterval(t);location.href='/';}
+      },1000);
+    } else {
+      say(x.responseText||'Update failed',1);$('go').disabled=false;
+    }
+  };
+  x.onerror=()=>{say('Connection lost during upload',1);$('go').disabled=false;};
+  x.open('POST','/update');x.send(fd);
+});
+</script></body></html>
+)HTML";
+
 const char kAppJs[] PROGMEM = R"JS(
 let state=null,timer=null;
 const $=id=>document.getElementById(id);
