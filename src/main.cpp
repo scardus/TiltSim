@@ -7,6 +7,7 @@
 #include "tilt_config.h"
 #include "tilt_encoding.h"
 #include "version.h"
+#include "web_server.h"
 
 namespace {
 constexpr int8_t kMeasuredPower = -10;
@@ -129,7 +130,9 @@ void setup() {
 
   // Before BLE: the captive portal blocks, and there is no point holding the
   // BLE stack's memory while it does.
-  netBegin();
+  if (netBegin()) {
+    webServerBegin();
+  }
 
   BLEDevice::init("ESP32-iBeacon");
   gAdvertising = BLEDevice::getAdvertising();
