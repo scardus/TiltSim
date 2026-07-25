@@ -23,7 +23,12 @@ then the device carries on advertising offline.
 
 ## Web interface
 
-- A master switch to stop and start all advertising at once.
+- **Power** — stops and starts all advertising at once.
+- **Units** — shows temperatures in °F or °C. This changes the display only:
+  the device stores and advertises °F, because that is what Tilt hydrometers
+  do. Variance converts as a range rather than a temperature, so ±2 °F reads as
+  ±1.1 °C. The choice is remembered per browser rather than on the device, so
+  two people looking at the same simulator can each use their own scale.
 - One card per Tilt colour, accented in that colour, each with its own enable
   toggle.
 - Temperature and gravity, plus a **variance** range for each. Variance is the
@@ -46,6 +51,10 @@ them:
 |---|---|---|
 | Standard | 68 °F, 1.053 | major 68, minor 1053 |
 | Pro | 68.5 °F, 1.0530 | major 685, minor 10530 |
+
+With **Units** set to °C you enter Celsius instead and the page converts before
+sending — 20 °C is the same 68 °F to the device, and the card's on-air caption
+still shows the raw `major`/`minor` going over the wire.
 
 Variance is also entered in real units, so ±2 °F means ±2 °F whether or not Pro
 is enabled. (Before v0.2.0 the Pro emulation was a hand-scaled row in the source
@@ -140,6 +149,10 @@ follow, and breaking either one is a real fault rather than a style point:
 Patches are partial — send only the fields you are changing. Values are clamped
 server-side (temperature −40 to 250 °F, gravity 0.900 to 2.000), so the browser
 is never trusted.
+
+`tempF` and `tempVarianceF` are always Fahrenheit, whatever the web UI happens
+to be displaying — the °C option is a browser-side convenience and never
+reaches the device. There is no Celsius form of these fields.
 
 ```sh
 curl -X POST http://tiltsim-a1b2c3.local/api/tilt/0 \
