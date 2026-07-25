@@ -66,6 +66,15 @@ top:3px;background:#fff;border-radius:50%;transition:.15s}
 input:checked+.sl{background:var(--ok)}
 input:checked+.sl:before{transform:translateX(18px)}
 .pro{display:flex;align-items:center;gap:7px;font-size:12px;color:var(--muted)}
+/* Two-state picker where neither state is "off", so a switch would not say
+which unit is active. Buttons need the font and line-height spelled out - form
+controls do not inherit them. */
+.seg{display:inline-flex;border:1px solid var(--line);border-radius:8px;
+overflow:hidden;background:var(--card2)}
+.seg button{background:none;border:0;color:var(--muted);font-family:inherit;
+font-size:13px;line-height:1.4;padding:7px 12px;cursor:pointer}
+.seg button:hover{color:var(--fg)}
+.seg button.on{background:var(--accent);color:#fff}
 .tog.sm{width:34px;height:20px}
 .tog.sm .sl:before{height:14px;width:14px}
 .tog.sm input:checked+.sl:before{transform:translateX(14px)}
@@ -90,8 +99,15 @@ const char kIndexHtml[] PROGMEM = R"HTML(
     <div class="host"><span id="dot" class="dot down"></span><span id="host">connecting…</span></div>
   </div>
   <div class="master">
-    <span>All advertising</span>
+    <span>Power</span>
     <label class="tog"><input type="checkbox" id="master"><span class="sl"></span></label>
+  </div>
+  <div class="master">
+    <span>Units</span>
+    <div class="seg" id="units">
+      <button type="button" data-u="F">°F</button>
+      <button type="button" data-u="C">°C</button>
+    </div>
   </div>
   <nav><a class="btn" href="/ota">Firmware</a>
   <button class="btn danger" id="forget">Forget WiFi</button></nav>
@@ -191,6 +207,17 @@ const dp=(pro,g)=>pro?(g?4:1):(g?3:0);
 const enc=(v,pro,g)=>Math.min(65535,Math.max(0,
   Math.round(v*(g?(pro?10000:1000):(pro?10:1)))));
 
+// Display only. Tilts advertise degF, so that is what is stored and sent; these
+// convert at render time and back again on edit.
+//
+// Variance is a delta, not a temperature - it scales without the 32 offset.
+// Running it through the absolute formula would show +/-2 degF as -16.7 degC.
+const f2c=f=>(f-32)*5/9, c2f=c=>c*9/5+32;
+const f2cDelta=d=>d*5/9, c2fDelta=d=>d*9/5;
+
+let units=localStorage.getItem('units')==='C'?'C':'F';
+const isC=()=>units==='C';
+
 function card(t,i){
   const c=document.createElement('div');
   c.className='card'+(t.enabled?'':' off');
@@ -204,10 +231,12 @@ function card(t,i){
         ${t.enabled?'checked':''}><span class="sl"></span></label>
     </div></div>
   <div class="row">
-    <div><label>Temperature °F</label><input type="number" data-f="tempF"
-      step="${t.pro?0.1:1}" min="-40" max="250" value="${t.tempF.toFixed(dp(t.pro,0))}"></div>
-    <div><label>Variance ±°F</label><input type="number" data-f="tempVarianceF"
-      step="0.1" min="0" max="20" value="${t.tempVarianceF.toFixed(1)}"></div>
+    <div><label>Temperature °${units}</label><input type="number" data-f="tempF"
+      step="${isC()?0.1:(t.pro?0.1:1)}" min="-40" max="${isC()?121.1:250}"
+      value="${(isC()?f2c(t.tempF):t.tempF).toFixed(isC()?1:dp(t.pro,0))}"></div>
+    <div><label>Variance ±°${units}</label><input type="number" data-f="tempVarianceF"
+      step="0.1" min="0" max="${isC()?11.1:20}"
+      value="${(isC()?f2cDelta(t.tempVarianceF):t.tempVarianceF).toFixed(1)}"></div>
   </div>
   <div class="row">
     <div><label>Gravity SG</label><input type="number" data-f="gravity"
@@ -221,8 +250,11 @@ function card(t,i){
   c.querySelectorAll('[data-f]').forEach(el=>{
     el.addEventListener('change',()=>{
       const f=el.dataset.f;
-      const v=el.type==='checkbox'?el.checked:parseFloat(el.value);
+      let v=el.type==='checkbox'?el.checked:parseFloat(el.value);
       if(el.type!=='checkbox'&&isNaN(v)){toast('Not a number',1);return;}
+      // The device stores degF, so convert back out of the display units.
+      if(isC()&&f==='tempF')v=c2f(v);
+      if(isC()&&f==='tempVarianceF')v=c2fDelta(v);
       send(i,{[f]:v});
     });
   });
@@ -233,6 +265,8 @@ function render(){
   $('host').textContent=state.hostname+'.local · '+state.ip;
   $('dot').className='dot '+(state.connected?'up':'down');
   $('master').checked=state.masterEnabled;
+  $('units').querySelectorAll('button').forEach(b=>
+    b.classList.toggle('on',b.dataset.u===units));
   $('foot').textContent=state.name+' v'+state.version+' · built '+state.built;
   const g=$('grid');g.innerHTML='';
   state.tilts.forEach((t,i)=>g.appendChild(card(t,i)));
@@ -261,6 +295,16 @@ $('master').addEventListener('change',async e=>{
     if(!r.ok)throw new Error();
     state.masterEnabled=e.target.checked;toast('Saved');
   }catch(err){toast('Save failed',1);load();}
+});
+
+// Display-only: re-renders from the state already in hand and never touches the
+// API, so what is advertised is unaffected.
+$('units').addEventListener('click',e=>{
+  const b=e.target.closest('button[data-u]');
+  if(!b||b.dataset.u===units)return;
+  units=b.dataset.u;
+  localStorage.setItem('units',units);
+  if(state)render();
 });
 
 $('forget').addEventListener('click',()=>{
