@@ -3,6 +3,7 @@
 #include <BLEBeacon.h>
 #include <BLEDevice.h>
 
+#include "tilt_config.h"
 #include "tilt_encoding.h"
 
 namespace {
@@ -105,6 +106,8 @@ void stopIBeaconAdvertisement() {
 void setup() {
   Serial.begin(115200);
   randomSeed(static_cast<unsigned long>(micros()));
+  configBegin();
+  configPrint();
   BLEDevice::init("ESP32-iBeacon");
   gAdvertising = BLEDevice::getAdvertising();
   gAdvertising->setScanResponse(false);
@@ -116,6 +119,8 @@ void setup() {
 void loop() {
   const unsigned long now = millis();
   const size_t beaconCount = sizeof(kBeacons) / sizeof(kBeacons[0]);
+
+  configFlushIfDue();
 
   if (!gRunActive && !gIsAdvertising && (now - gLastRunMs >= kRunPeriodMs)) {
     gRunVarianceDegF = random(-2, 3);
