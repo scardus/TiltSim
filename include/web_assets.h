@@ -26,7 +26,13 @@ margin-right:6px;vertical-align:1px}
 nav{display:flex;gap:8px}
 .btn{background:var(--card2);color:var(--fg);border:1px solid var(--line);
 padding:8px 14px;border-radius:8px;cursor:pointer;font-size:14px;
-text-decoration:none;display:inline-block}
+text-decoration:none;
+/* .btn is used on both <a> and <button>. Form controls do not inherit the page
+font or line-height, and an inline-block anchor lays its text out on the line
+box while a button centres its own content, so the two disagree vertically.
+Inheriting the font and centring both as flex containers makes them identical. */
+font-family:inherit;line-height:1.4;
+display:inline-flex;align-items:center;justify-content:center}
 .btn:hover{border-color:var(--accent)}
 .btn.danger:hover{border-color:var(--bad);color:var(--bad)}
 .master{display:flex;align-items:center;gap:12px}
