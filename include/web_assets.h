@@ -66,6 +66,7 @@ top:3px;background:#fff;border-radius:50%;transition:.15s}
 input:checked+.sl{background:var(--ok)}
 input:checked+.sl:before{transform:translateX(18px)}
 .pro{display:flex;align-items:center;gap:7px;font-size:12px;color:var(--muted)}
+.power{display:flex;align-items:center;gap:7px;font-size:12px;color:var(--muted)}
 /* Two-state picker where neither state is "off", so a switch would not say
 which unit is active. Buttons need the font and line-height spelled out - form
 controls do not inherit them. */
@@ -225,10 +226,10 @@ function card(t,i){
   c.innerHTML=`<div class="top">
     <h2><span class="sw"></span>${t.name}</h2>
     <div class="master">
-      <span class="pro"><label class="tog sm"><input type="checkbox" data-f="pro"
-        ${t.pro?'checked':''}><span class="sl"></span></label>Pro</span>
-      <label class="tog"><input type="checkbox" data-f="enabled"
-        ${t.enabled?'checked':''}><span class="sl"></span></label>
+      <span class="pro">Pro<label class="tog sm"><input type="checkbox" data-f="pro"
+        ${t.pro?'checked':''}><span class="sl"></span></label></span>
+      <span class="power">Power <label class="tog"><input type="checkbox" data-f="enabled"
+        ${t.enabled?'checked':''}><span class="sl"></span></label></span>
     </div></div>
   <div class="row">
     <div><label>Temperature °${units}</label><input type="number" data-f="tempF"
