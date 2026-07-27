@@ -96,10 +96,17 @@ pio test -e esp32dev                     # unit tests, run on the board
 pio check --fail-on-defect=high          # static analysis
 ```
 
-Unit tests cover `lib/tilt_encoding` — the UUID byte-reversal, the Pro scaling
-and clamping, and the slot maths. They run on the target because there is no
-host compiler assumed; the module is Arduino-free so it links into the test
-runner without dragging in `main.cpp`.
+Unit tests cover `lib/tilt_encoding` — the advertised payload byte for byte, the
+Pro scaling and clamping, and the slot maths. They run on the target because
+there is no host compiler assumed; the module is Arduino-free so it links into
+the test runner without dragging in `main.cpp`.
+
+The payload is assembled in `buildIBeaconPayload()` rather than with the
+framework's `BLEBeacon` class, deliberately. `BLEBeacon` byte-swaps every 16-bit
+setter, so `setManufacturerId(0x004C)` actually advertises company ID `0x4C00` —
+which is not Apple. That bug shipped here for a while, and because the payload
+was built inside `main.cpp` no test could see it. Building the bytes in a pure
+function keeps the on-air order pinned by `test_payload_matches_reference_byte_for_byte`.
 
 Two things in `platformio.ini` are worth knowing:
 
