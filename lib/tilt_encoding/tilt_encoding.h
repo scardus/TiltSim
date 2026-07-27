@@ -69,6 +69,18 @@ constexpr unsigned long kAdvDelayMaxMs = 10;
 constexpr size_t kIBeaconPayloadLen = 25;
 using IBeaconPayload = std::array<uint8_t, kIBeaconPayloadLen>;
 
+// The AD flags, which the controller emits as its own `02 01 <flags>` structure
+// ahead of the manufacturer data above rather than as part of the payload. Kept
+// here anyway: this header is the one place the on-air bytes are described, and
+// the receiver is written against it.
+//
+// 0x1A is bit 1 (LE General Discoverable) plus bits 3 and 4 (simultaneous LE and
+// BR/EDR, controller and host), giving the canonical iBeacon advertisement
+// `02 01 1A 1A FF 4C 00 02 15 ...`. The 0x04 this replaced was BR/EDR Not
+// Supported on its own, with no discoverable bit set at all, which a scanner
+// filtering on general discoverability is entitled to ignore.
+constexpr uint8_t kAdvFlags = 0x1A;
+
 // Returns false, leaving out untouched, if canonicalUuid is not a valid 128-bit
 // UUID. Major and minor are the already-encoded raw field values.
 bool buildIBeaconPayload(const char* canonicalUuid, uint16_t major,

@@ -199,9 +199,9 @@ const char kAppJs[] PROGMEM = R"JS(
 let state=null,timer=null;
 const $=id=>document.getElementById(id);
 
-function toast(msg,err){const t=$('toast');t.textContent=msg;
+function toast(msg,err,ms){const t=$('toast');t.textContent=msg;
   t.className='show'+(err?' err':'');clearTimeout(timer);
-  timer=setTimeout(()=>t.className='',1600);}
+  timer=setTimeout(()=>t.className='',ms||1600);}
 
 // Mirrors the firmware: pro Tilts advertise 10x so they carry one more decimal.
 const dp=(pro,g)=>pro?(g?4:1):(g?3:0);
@@ -278,13 +278,35 @@ async function load(){
   catch(e){toast('Cannot reach device',1);}
 }
 
+// The device clamps whatever it is sent and answers 200 with the corrected
+// tilt, so an out-of-range entry used to come back as a green "Saved" with the
+// box quietly snapped to the limit. Compare what went out with what came back
+// and say so instead. The tolerances absorb the float32 round-trip, which is
+// well below a decimal place in every field; anything larger is a real clamp.
+const eps={tempF:0.05,tempVarianceF:0.05,gravity:0.00005,gravityVariance:0.00005};
+function clampNote(patch,t){
+  for(const f in patch){
+    if(typeof patch[f]!=='number'||Math.abs(t[f]-patch[f])<=eps[f])continue;
+    // Reported in the display units, so it matches the box the user is looking
+    // at rather than the degF the device actually stores.
+    if(f==='tempF')
+      return 'Out of range — set to '+(isC()?f2c(t[f]):t[f]).toFixed(1)+'°'+units;
+    if(f==='tempVarianceF')
+      return 'Out of range — set to ±'+(isC()?f2cDelta(t[f]):t[f]).toFixed(1)+'°'+units;
+    return 'Out of range — set to '+t[f].toFixed(4)+' SG';
+  }
+  return null;
+}
+
 async function send(i,patch){
   try{
     const r=await fetch('/api/tilt/'+i,{method:'POST',
       headers:{'Content-Type':'application/json'},body:JSON.stringify(patch)});
     if(!r.ok)throw new Error(await r.text());
     state.tilts[i]=await r.json();
-    render();toast('Saved');
+    const note=clampNote(patch,state.tilts[i]);
+    render();
+    note?toast(note,1,2600):toast('Saved');
   }catch(e){toast(e.message||'Save failed',1);load();}
 }
 

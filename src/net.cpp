@@ -12,6 +12,7 @@ constexpr unsigned long kReconnectIntervalMs = 30000;
 
 String gHostname;
 bool gMdnsStarted = false;
+bool gPortalSaved = false;
 unsigned long gLastReconnectMs = 0;
 
 void startMdns() {
@@ -54,6 +55,9 @@ bool netBegin() {
   wm.setHostname(hostname.c_str());
   wm.setConfigPortalTimeout(kPortalTimeoutSec);
   wm.setDarkMode(true);
+  // Fires only when the portal actually saved a network, so this stays false on
+  // the ordinary connect-from-NVS boot.
+  wm.setSaveConfigCallback([]() { gPortalSaved = true; });
 
   Serial.printf("WiFi: connecting as %s\n", hostname.c_str());
   if (!wm.autoConnect(hostname.c_str())) {
@@ -63,6 +67,22 @@ bool netBegin() {
 
   Serial.printf("WiFi: %s  ip=%s  rssi=%d dBm\n", WiFi.SSID().c_str(),
                 WiFi.localIP().toString().c_str(), WiFi.RSSI());
+
+  // The portal's own web server has been torn down by now, but the browser that
+  // submitted the form still has a keep-alive socket to it, and closing that
+  // leaves a PCB on port 80 for up to ~80 s (FIN_WAIT_2, then TIME_WAIT).
+  // AsyncTCP binds with the raw lwIP API and no SO_REUSEADDR, so the admin
+  // server's bind fails with ERR_USE (-8) -- and AsyncServer::begin() returns
+  // void, so it fails silently and the UI is simply unreachable. Restarting is
+  // cheaper than waiting it out: the next boot connects straight from NVS and
+  // never opens port 80 in the first place.
+  if (gPortalSaved) {
+    Serial.println("WiFi: credentials saved, restarting so port 80 is free");
+    Serial.flush();
+    delay(200);
+    ESP.restart();
+  }
+
   startMdns();
   return true;
 }

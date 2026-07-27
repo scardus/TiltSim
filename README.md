@@ -18,6 +18,12 @@ over the same page.
 3. Open **http://tiltsim-chipid.local** — the serial log prints the exact
    name at 115200 baud.
 
+Saving a network in the portal reboots the device once before the admin page
+comes up. That is deliberate: the portal's own web server holds port 80 for up
+to a minute or so after it closes, and the admin server cannot bind underneath
+it. Connecting from the stored credentials on the next boot never opens the
+portal at all.
+
 If the saved network is unreachable the portal reappears for three minutes,
 then the device carries on advertising offline.
 
@@ -37,6 +43,9 @@ then the device carries on advertising offline.
 - A **Pro** toggle per tilt.
 - Each card shows the resulting `major`/`minor` so what is going on the wire is
   never a mystery.
+- Values outside the allowed range are clamped by the device rather than
+  rejected, and the page says which value it settled on instead of reporting a
+  plain save.
 - **Firmware** page for over-the-air updates.
 
 Settings are saved to flash and survive a reboot.
@@ -63,19 +72,35 @@ and the variance was applied *after* scaling, so a Pro only wandered ±0.2 °F.)
 ## How advertising works
 
 A real Tilt wakes roughly every five seconds, sends a burst, and sleeps. The
-simulator matches that:
+simulator matches the *reading* cadence but not the duty cycle:
 
 - Each cycle is 5000 ms, plus 0–10 ms of `advDelay` jitter as the BLE Core
-  Specification requires.
-- Every enabled colour gets one slot per cycle, `min(1000, 5000 / enabled)` ms
-  long. Three colours use the full 1 s burst and leave 2 s quiet; all eight pack
-  the cycle at 625 ms each.
-- So each colour is seen once per five seconds no matter how many are enabled.
+  Specification requires. Readings are drawn once at the start of a cycle, so
+  every colour reports one value per five seconds however often it airs.
+- Within the cycle the enabled colours rotate, each holding the radio for
+  200 ms, wrapping round and repeating until the cycle ends. Four colours make
+  an 800 ms rotation; all eight make 1.6 s.
 
-Only one colour is on air at a time — the ESP32 has a single advertising
-instance, and all simulated tilts share the one BLE MAC address. A scanner that
-identifies devices by MAC will see one device whose payload changes rather than
-eight separate ones.
+The rotation is the deliberate departure. A receiver that builds its list of
+devices per scan can only list a colour it actually heard inside that window,
+and the HM-10 used downstream defaults to a 3 s scan — so one 5 s-spaced burst
+per colour was missed more often than not, which is what made colours appear to
+alternate exclusively. Re-airing each colour every couple of hundred
+milliseconds puts all of them inside any 3 s window. One radio cannot advertise
+eight addresses at once (concurrent advertising sets need BLE 5.0 extended
+advertising, which the classic ESP32's Bluedroid stack does not provide), so the
+duty cycle is what gets traded.
+
+Only one colour is on air at a time, but each advertises from **its own BLE
+address** — a static random address derived from the chip's MAC, stable across
+restarts, with the colour index in the low bits. A scanner that identifies
+devices by address therefore sees eight distinct Tilts rather than one whose
+UUID keeps changing.
+
+The device advertises **non-connectable** (`ADV_TYPE_SCAN_IND`): it is a beacon,
+and nothing can open a connection to it and take the radio away mid-rotation.
+The flags byte is `0x1A`, so a full advertisement begins
+`02 01 1A 1A FF 4C 00 02 15 …` — the canonical iBeacon layout.
 
 ## Firmware updates
 
@@ -97,7 +122,7 @@ pio check --fail-on-defect=high          # static analysis
 ```
 
 Unit tests cover `lib/tilt_encoding` — the advertised payload byte for byte, the
-Pro scaling and clamping, and the slot maths. They run on the target because
+Pro scaling and clamping, and the rotation maths. They run on the target because
 there is no host compiler assumed; the module is Arduino-free so it links into
 the test runner without dragging in `main.cpp`.
 
@@ -123,7 +148,7 @@ Two things in `platformio.ini` are worth knowing:
 | Path | What it does |
 |---|---|
 | `src/main.cpp` | Setup, and the advertising scheduler |
-| `lib/tilt_encoding/` | Pure payload logic — UUIDs, scaling, slot timing |
+| `lib/tilt_encoding/` | Pure payload logic — UUIDs, scaling, rotation timing |
 | `src/tilt_config.cpp` | Runtime settings and NVS persistence |
 | `src/net.cpp` | WiFi provisioning, hostname, mDNS |
 | `src/web_server.cpp` | HTTP API and OTA handler |

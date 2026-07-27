@@ -100,7 +100,7 @@ bool startSlot(const size_t slotIndex) {
                                  BLE_ADDR_TYPE_RANDOM);
 
   BLEAdvertisementData advData;
-  advData.setFlags(0x04);
+  advData.setFlags(kAdvFlags);
   // The length-taking constructor is required: the payload contains 0x00 bytes.
   advData.setManufacturerData(
       std::string(reinterpret_cast<const char*>(gPayloads[colourIndex].data()),
@@ -165,6 +165,16 @@ void setup() {
   BLEDevice::init("ESP32-iBeacon");
   gAdvertising = BLEDevice::getAdvertising();
   gAdvertising->setScanResponse(false);
+
+  // A Tilt is a beacon, not something you connect to. The library default is
+  // ADV_TYPE_IND, which is connectable, so without this a receiver could open a
+  // connection and take the radio away mid-rotation. SCAN_IND is
+  // non-connectable but still scannable, so an active scanner's SCAN_REQ is
+  // still answered -- with an empty response, since scan data is off above.
+  //
+  // Set once: start() passes m_advParams every slice, and neither
+  // setDeviceAddress() nor setAdvertisementData() disturbs the type.
+  gAdvertising->setAdvertisementType(ADV_TYPE_SCAN_IND);
 
   Serial.printf("BLE: %u colours rotate every %lu ms, readings refresh every %lu ms\n",
                 static_cast<unsigned>(kTiltCount), kSliceMs, kCyclePeriodMs);

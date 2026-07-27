@@ -4,6 +4,7 @@
 #include <ESPAsyncWebServer.h>
 #include <Update.h>
 #include <esp_ota_ops.h>
+#include <lwip/sockets.h>
 
 #include "net.h"
 #include "tilt_config.h"
@@ -12,7 +13,19 @@
 #include "web_assets.h"
 
 namespace {
-AsyncWebServer gServer(80);
+constexpr uint16_t kHttpPort = 80;
+AsyncWebServer gServer(kHttpPort);
+
+// The port can still be held when we come to bind: WiFiManager's captive portal
+// closes its listening socket but not the browser's keep-alive connection, and
+// that lingers in FIN_WAIT_2 then TIME_WAIT for up to ~80 s. netBegin() reboots
+// after a portal save to avoid exactly that, so this is a backstop -- but a
+// headless device whose admin UI never comes back is bad enough to warrant one.
+bool gRoutesRegistered = false;
+bool gBound = false;
+bool gBindFailureLogged = false;
+unsigned long gLastBindAttemptMs = 0;
+constexpr unsigned long kBindRetryMs = 5000;
 
 // Handlers below run on the AsyncTCP task, so every touch of gConfig is inside
 // configLock()/configUnlock() and persisting is left to loop().
@@ -223,6 +236,49 @@ void sendProgmem(AsyncWebServerRequest* request, const char* type, const char* b
   response->addHeader("Cache-Control", "no-cache");
   request->send(response);
 }
+
+// AsyncWebServer cannot report a bind failure: AsyncServer::begin() returns void
+// and only logs "bind error: -8", so the server can quietly never start while
+// everything here looks fine. Probing first is the only way to know.
+//
+// Deliberately without SO_REUSEADDR. AsyncTCP binds with the raw lwIP TCP API,
+// which honours no such option, so an unadorned socket fails under exactly the
+// conditions AsyncTCP fails -- setting it here would make the probe pass while
+// the real bind still lost. A socket that is bound and closed without ever
+// listening leaves nothing behind.
+bool portIsFree(const uint16_t port) {
+  const int fd = lwip_socket(AF_INET, SOCK_STREAM, 0);
+  if (fd < 0) {
+    return true;  // Cannot tell; let the real bind try its luck.
+  }
+  sockaddr_in addr = {};
+  addr.sin_family = AF_INET;
+  addr.sin_addr.s_addr = htonl(INADDR_ANY);
+  addr.sin_port = htons(port);
+  const bool isFree =
+      lwip_bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0;
+  lwip_close(fd);
+  return isFree;
+}
+
+// Retrying is safe: on a failed bind AsyncTCP closes the pcb and nulls it, so
+// the `if (_pcb) return;` guard in AsyncServer::begin() does not block a second
+// attempt. Routes are registered once, in webServerBegin().
+bool tryBind() {
+  if (!portIsFree(kHttpPort)) {
+    if (!gBindFailureLogged) {
+      Serial.printf("HTTP: port %u still in use, retrying every %lu ms\n",
+                    kHttpPort, kBindRetryMs);
+      gBindFailureLogged = true;
+    }
+    return false;
+  }
+
+  gServer.begin();
+  gBound = true;
+  Serial.printf("HTTP: http://%s.local/\n", netHostname().c_str());
+  return true;
+}
 }  // namespace
 
 bool webOtaInProgress() {
@@ -230,6 +286,16 @@ bool webOtaInProgress() {
 }
 
 void webServerLoop() {
+  // gRoutesRegistered guards against binding a server with no handlers on it:
+  // an offline boot never calls webServerBegin() at all.
+  if (gRoutesRegistered && !gBound &&
+      millis() - gLastBindAttemptMs >= kBindRetryMs) {
+    gLastBindAttemptMs = millis();
+    if (tryBind()) {
+      Serial.println("HTTP: bound on retry");
+    }
+  }
+
   if (gPending == PendingAction::None ||
       (millis() - gPendingAtMs < kRebootGraceMs)) {
     return;
@@ -244,7 +310,7 @@ void webServerLoop() {
   ESP.restart();
 }
 
-void webServerBegin() {
+bool webServerBegin() {
   gServer.on("/", HTTP_GET, [](AsyncWebServerRequest* request) {
     sendProgmem(request, "text/html", kIndexHtml);
   });
@@ -288,6 +354,9 @@ void webServerBegin() {
     request->send(404, "text/plain", "Not found");
   });
 
-  gServer.begin();
-  Serial.printf("HTTP: http://%s.local/\n", netHostname().c_str());
+  // Failing here is not fatal: webServerLoop() keeps trying, so the UI comes
+  // back on its own once whatever is holding the port lets go.
+  gRoutesRegistered = true;
+  gLastBindAttemptMs = millis();
+  return tryBind();
 }
