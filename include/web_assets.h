@@ -228,7 +228,7 @@ function card(t,i){
     <div class="master">
       <span class="pro">Pro<label class="tog sm"><input type="checkbox" data-f="pro"
         ${t.pro?'checked':''}><span class="sl"></span></label></span>
-      <span class="power">Power <label class="tog"><input type="checkbox" data-f="enabled"
+      <span class="power">Power <label class="tog sm"><input type="checkbox" data-f="enabled"
         ${t.enabled?'checked':''}><span class="sl"></span></label></span>
     </div></div>
   <div class="row">
