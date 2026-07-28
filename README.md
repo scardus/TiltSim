@@ -111,6 +111,17 @@ into it. Files that are not ESP32 images are refused before anything is written.
 The footer shows the running version, build date, OTA slot (`app0`/`app1`) and
 image hash — the slot and hash are what actually prove an update took effect.
 
+An installed image runs on probation until it proves itself: 60 seconds up,
+and answering on port 80 if it has a network. Until then `/api/state` reports
+`otaState: "pending verify"`, and any restart puts the previous firmware back.
+An image that panics is rolled back by the bootloader on the next boot; one
+that runs but stays unreachable rolls itself back after five minutes. So a bad
+update costs a reboot rather than a USB cable and a trip to the device.
+
+The rollback needs a working image in the other slot, which a board flashed
+only over USB does not have. It stays put in that case rather than falling back
+to nothing.
+
 ## Development
 
 ```sh
@@ -152,6 +163,7 @@ Two things in `platformio.ini` are worth knowing:
 | `src/tilt_config.cpp` | Runtime settings and NVS persistence |
 | `src/net.cpp` | WiFi provisioning, hostname, mDNS |
 | `src/web_server.cpp` | HTTP API and OTA handler |
+| `src/ota_rollback.cpp` | Confirms a new image, or puts the old one back |
 | `include/web_assets.h` | The web UI, embedded in the firmware |
 
 The UI is compiled into the binary rather than served from a filesystem, so
@@ -179,7 +191,7 @@ follow, and breaking either one is a real fault rather than a style point:
 
 | Method | Path | Purpose |
 |---|---|---|
-| GET | `/api/state` | Full config plus hostname, IP, version, OTA slot, image hash, free heap |
+| GET | `/api/state` | Full config plus hostname, IP, version, OTA slot and probation state, image hash, free heap |
 | POST | `/api/master` | `{"enabled": true\|false}` |
 | POST | `/api/tilt/<0-7>` | Partial patch of one tilt's settings |
 | POST | `/api/reset-wifi` | Forget credentials and reboot into the portal |
