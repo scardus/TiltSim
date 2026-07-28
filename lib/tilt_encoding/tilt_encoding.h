@@ -43,9 +43,10 @@ constexpr unsigned long kCyclePeriodMs = 5000;
 //
 // This is a deliberate departure from real Tilt behaviour, which bursts once per
 // 5 s from its own radio. One radio cannot advertise eight addresses at once
-// (concurrent advertising sets need BLE 5.0 extended advertising, which the
-// classic ESP32's Bluedroid stack does not provide), so the duty cycle is traded
-// for discoverability. The reading cadence stays honest at one value per 5 s.
+// (concurrent advertising sets need BLE 5.0 extended advertising, and the
+// classic ESP32 is 4.2 silicon -- no host stack can offer what the radio does
+// not have), so the duty cycle is traded for discoverability. The reading
+// cadence stays honest at one value per 5 s.
 constexpr unsigned long kSliceMs = 200;
 
 // BLE Core Spec advDelay: 0-10 ms of pseudo-random jitter per advertising event.
@@ -94,8 +95,9 @@ bool buildIBeaconPayload(const char* canonicalUuid, uint16_t major,
 // The controller emits both; the flags structure is not part of the iBeacon
 // payload itself, which is why it lives here rather than in the payload above.
 //
-// This exists so the bytes can be handed to esp_ble_gap_config_adv_data_raw()
-// directly. Going through BLEAdvertisementData instead cost seven heap
+// This exists so the bytes can be handed to ble_gap_adv_set_data() directly,
+// which passes them to the controller unaltered -- flags structure and all.
+// Going through an advertisement-builder class instead cost seven heap
 // allocations every 200 ms slice -- it takes std::string by value twice, builds
 // a concatenation, and its getPayload() returns by value and is called twice --
 // which is roughly 35 malloc/free pairs a second of small-block churn running
@@ -137,6 +139,26 @@ using BleAddress = std::array<uint8_t, kBleAddressLen>;
 // baseMac must point to kBleAddressLen bytes. Returns false, leaving out
 // untouched, for a null pointer or a colourIndex past the last colour.
 bool tiltBleAddress(const uint8_t* baseMac, size_t colourIndex, BleAddress& out);
+
+// The same six bytes in the order the radio sends them: least significant
+// first.
+//
+// tiltBleAddress() above returns an address the way it is written down and
+// printed, most significant byte first -- which is also the order Bluedroid's
+// esp_bd_addr_t took, so for a long time no conversion existed here. NimBLE
+// takes the opposite order, straight through to the HCI command:
+// ble_hs_id_set_rnd() looks for the static-random marker in byte 5, not byte 0.
+//
+// Feeding it the printed order fails in two different ways depending on the
+// board's MAC. Usually the marker check fails and the address is rejected, so
+// nothing advertises at all; but on a MAC whose last byte happens to have both
+// top bits set it is accepted, and every colour then airs from a reversed
+// address no receiver has ever seen. Neither failure looks like a byte-order
+// bug from the outside, which is why the conversion is a named function with a
+// test rather than a reverse loop at the call site.
+//
+// out may alias printedOrder.
+void bleAddressLittleEndian(const BleAddress& printedOrder, BleAddress& out);
 
 // Unpacks the value ESP.getEfuseMac() returns into six bytes.
 //

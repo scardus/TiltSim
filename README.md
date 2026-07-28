@@ -88,8 +88,8 @@ per colour was missed more often than not, which is what made colours appear to
 alternate exclusively. Re-airing each colour every couple of hundred
 milliseconds puts all of them inside any 3 s window. One radio cannot advertise
 eight addresses at once (concurrent advertising sets need BLE 5.0 extended
-advertising, which the classic ESP32's Bluedroid stack does not provide), so the
-duty cycle is what gets traded.
+advertising, and the classic ESP32 is 4.2 silicon), so the duty cycle is what
+gets traded.
 
 Only one colour is on air at a time, but each advertises from **its own BLE
 address** — a static random address derived from the chip's MAC, stable across
@@ -97,10 +97,21 @@ restarts, with the colour index in the low bits. A scanner that identifies
 devices by address therefore sees eight distinct Tilts rather than one whose
 UUID keeps changing.
 
-The device advertises **non-connectable** (`ADV_TYPE_SCAN_IND`): it is a beacon,
-and nothing can open a connection to it and take the radio away mid-rotation.
-The flags byte is `0x1A`, so a full advertisement begins
+The device advertises **non-connectable but scannable** (`ADV_SCAN_IND`): it is
+a beacon, and nothing can open a connection to it and take the radio away
+mid-rotation. The flags byte is `0x1A`, so a full advertisement begins
 `02 01 1A 1A FF 4C 00 02 15 …` — the canonical iBeacon layout.
+
+The BLE stack is **NimBLE**, not the Bluedroid-based library bundled with the
+Arduino core. Bluedroid was 726 KB of a 1.77 MB image and held tens of
+kilobytes of heap; swapping it out took the image from 90.3% of the app slot to
+60.3%, and took the largest contiguous heap block on an idle device from 43 KB
+to 110 KB. The advertisement itself is unchanged — same 30 bytes, same
+`ADV_SCAN_IND`, same per-colour static random addresses — because the bytes
+were already assembled by hand and are handed to the controller raw either way.
+The one thing that is not a rename is the address byte order: Bluedroid takes
+the six bytes most significant first, NimBLE least significant first, so
+`bleAddressLittleEndian()` sits between the two and is pinned by a test.
 
 ## Firmware updates
 
@@ -146,9 +157,15 @@ function keeps the on-air order pinned by `test_payload_matches_reference_byte_f
 
 Two things in `platformio.ini` are worth knowing:
 
-- `board_build.partitions = min_spiffs.csv`. BLE alone filled 85% of the
-  default 1.25 MB app slot; with WiFi and the web server it does not fit, and
-  OTA needs two slots.
+- `board_build.partitions = min_spiffs.csv`. This was once forced: Bluedroid
+  alone filled 85% of the default 1.25 MB app slot. On NimBLE the image is
+  1.19 MB and would fit the default scheme again — but changing the partition
+  table cannot be done over OTA, so it stays. Both slots are 1.875 MB and the
+  image now uses 60% of one.
+- The three `CONFIG_BT_NIMBLE_ROLE_*=0` flags. This is a broadcaster and
+  nothing else, so the client, scan and server roles are not compiled in. Note
+  the names: the library's docs give a `MYNEWT_VAL_BLE_ROLE_*` spelling, which
+  on the ESP port is derived from these and therefore loses to them silently.
 - `libdeps_dir` points outside the project. This tree lives under OneDrive,
   which dehydrates freshly-extracted package files; SCons then reads a null
   mtime and the build fails with `unsupported operand type(s) for -: 'float'
@@ -234,4 +251,4 @@ Purple, Orange, Blue, Yellow and Pink in that order.
 
 - An ESP32 board (developed against `esp32dev`)
 - Libraries resolve automatically: ESPAsyncWebServer, AsyncTCP, ArduinoJson,
-  WiFiManager, and the ESP32 BLE library bundled with the Arduino core
+  WiFiManager and NimBLE-Arduino
