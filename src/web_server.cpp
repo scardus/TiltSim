@@ -17,6 +17,28 @@ namespace {
 constexpr uint16_t kHttpPort = 80;
 AsyncWebServer gServer(kHttpPort);
 
+// Sized so the full /api/state document fits without the stream buffer having
+// to grow mid-write: AsyncResponseStream::write() calls cbuf::resizeAdd(), a
+// second and larger allocation plus a copy, on a heap that has little room for
+// one. The document is the fixed preamble plus eight tilts, and comes to about
+// 1.7 KB with every float serialised at its ugliest. A single tilt is far
+// smaller, so patch replies get their own modest size.
+constexpr size_t kStateBufferBytes = 2048;
+constexpr size_t kPatchBufferBytes = 512;
+
+// Belt and braces. AsyncAbstractResponse::_respond() adds this itself in
+// ESPAsyncWebServer 3.11 (WebResponses.cpp:340), which it did not always do --
+// the streaming responses used below inherit from it, and when they carried no
+// Connection header a browser that opened six at once left six sockets held
+// open with nothing to close them. Only AsyncBasicResponse has always set it
+// (WebResponses.cpp, both constructors), and the handlers here no longer use
+// that class. Stated explicitly so the behaviour does not depend on which
+// version of the library is installed.
+void finishResponse(AsyncWebServerRequest* request, AsyncWebServerResponse* response) {
+  response->addHeader("Connection", "close");
+  request->send(response);
+}
+
 // The port can still be held when we come to bind: WiFiManager's captive portal
 // closes its listening socket but not the browser's keep-alive connection, and
 // that lingers in FIN_WAIT_2 then TIME_WAIT for up to ~80 s. netBegin() reboots
@@ -81,9 +103,15 @@ void handleState(AsyncWebServerRequest* request) {
   }
   configUnlock();
 
-  String out;
-  serializeJson(doc, out);
-  request->send(200, "application/json", out);
+  // Streamed rather than serialised into a String and handed to send(), which
+  // would put this document in memory three times over: the JsonDocument, the
+  // String, and the copy AsyncBasicResponse keeps. On a device whose largest
+  // free block is a few kilobytes that is the difference between a page refresh
+  // working and the server running out of contiguous heap mid-request.
+  AsyncResponseStream* response =
+      request->beginResponseStream("application/json", kStateBufferBytes);
+  serializeJson(doc, *response);
+  finishResponse(request, response);
 }
 
 void handleMaster(AsyncWebServerRequest* request, const JsonVariant& body) {
@@ -143,9 +171,10 @@ void handleTiltPatch(AsyncWebServerRequest* request, const JsonVariant& body) {
   configUnlock();
   configMarkDirty();
 
-  String out;
-  serializeJson(doc, out);
-  request->send(200, "application/json", out);
+  AsyncResponseStream* response =
+      request->beginResponseStream("application/json", kPatchBufferBytes);
+  serializeJson(doc, *response);
+  finishResponse(request, response);
 }
 
 bool gOtaActive = false;
@@ -273,7 +302,7 @@ void sendProgmem(AsyncWebServerRequest* request, const char* type, const char* b
         return chunk;
       });
   response->addHeader("Cache-Control", "no-cache");
-  request->send(response);
+  finishResponse(request, response);
 }
 
 // AsyncWebServer cannot report a bind failure: AsyncServer::begin() returns void
