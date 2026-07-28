@@ -11,6 +11,7 @@
 #include "net.h"
 #include "tilt_config.h"
 #include "tilt_encoding.h"
+#include "web_server.h"
 
 namespace {
 // Matches the interval advertised in the payload. A receiver that spaces its
@@ -131,6 +132,18 @@ void postOne(const size_t index, const IspindelSettings& settings) {
 }
 
 void postRound() {
+  // Stand down during a firmware upload, for the same reason loop() stops the
+  // BLE rotation -- and with more cause. A round competes for the radio and the
+  // TCP stack with a 1.3 MB transfer, blocks for up to ten seconds per slot,
+  // and an https round takes tens of kilobytes of contiguous heap while it
+  // runs. The upload aborts itself after 15 s of silence, so anything that can
+  // stall it for ten is worth not doing. The reading is only skipped: the next
+  // round comes after the reboot the update ends with.
+  if (webOtaInProgress()) {
+    Serial.println("iSpindel: firmware upload in progress, skipping this round");
+    return;
+  }
+
   // One snapshot for the whole round rather than one per slot, so a round
   // cannot mix settings from before and after an edit.
   if (!configLock()) {
