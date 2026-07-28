@@ -534,7 +534,23 @@ void webServerLoop() {
   // it is set, loop() stops the radio every pass. Left alone the device stays
   // silent until someone power cycles it, which is a poor way to find out an
   // update failed on a device that is not in the room.
-  if (gOtaActive && millis() - gOtaLastChunkMs > kOtaStallMs) {
+  // Read the timestamp *before* sampling the clock, and compare signed.
+  //
+  // Written the other way round -- millis() - gOtaLastChunkMs -- this aborted
+  // healthy uploads. The two are read on different tasks: loop() would sample
+  // millis() as 25253, the AsyncTCP task would stamp the next chunk at 25254
+  // before loop() got to read it, and the unsigned subtraction then gave
+  // 4294967295 rather than -1. Every full-size upload tripped that within
+  // seconds, because a 1.7 MB image delivers chunks every few milliseconds for
+  // seventeen seconds and only one of them has to land in that window.
+  //
+  // Sampling the stamp first means a chunk arriving mid-check can only make the
+  // measured silence *older* than reality, by the microseconds between the two
+  // reads, which cannot manufacture a 15 second gap. The signed cast then keeps
+  // a wrapped or future-dated value small and negative instead of enormous.
+  const unsigned long lastChunkMs = gOtaLastChunkMs.load();
+  const long silentMs = static_cast<long>(millis() - lastChunkMs);
+  if (gOtaActive && silentMs > static_cast<long>(kOtaStallMs)) {
     // Under the lock, so this cannot land in the middle of an Update.write() on
     // the AsyncTCP task. On a genuinely stalled transfer that task is idle and
     // the take is uncontended; if a late chunk is being written right now, this
@@ -545,7 +561,8 @@ void webServerLoop() {
       gOtaStarted = false;
       gOtaError = "Upload stalled";
       updateUnlock();
-      Serial.println("OTA: upload stalled, aborted -- advertising resumes");
+      Serial.printf("OTA: upload stalled for %ld ms, aborted -- advertising resumes\n",
+                    silentMs);
     }
   }
 
