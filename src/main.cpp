@@ -82,15 +82,6 @@ void logHealth(const unsigned long now) {
   }
 }
 
-float randomOffset(const float range) {
-  if (range <= 0.0f) {
-    return 0.0f;
-  }
-  // random() is integer-only, so work in thousandths of the range.
-  const long steps = random(-1000, 1001);
-  return range * (static_cast<float>(steps) / 1000.0f);
-}
-
 // Snapshots the enabled colours and draws one reading each for the cycle ahead.
 // Logged here rather than per slice: the rotation re-airs each colour every few
 // hundred ms, and logging that would bury everything else.
@@ -120,9 +111,9 @@ void buildSchedule() {
     const TiltSettings& tilt = config.tilts[colourIndex];
 
     const uint16_t major =
-        encodeTemperature(tilt.tempF, randomOffset(tilt.tempVarianceF), tilt.pro);
+        encodeTemperature(tilt.tempF, randomVariance(tilt.tempVarianceF), tilt.pro);
     const uint16_t minor =
-        encodeGravity(tilt.gravity, randomOffset(tilt.gravityVariance), tilt.pro);
+        encodeGravity(tilt.gravity, randomVariance(tilt.gravityVariance), tilt.pro);
 
     IBeaconPayload payload;
     if (!buildIBeaconPayload(kTiltColours[colourIndex].uuid, major, minor,

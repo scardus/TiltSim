@@ -11,7 +11,8 @@ AppConfig gConfig;
 namespace {
 // Bump the low byte whenever the layout of AppConfig changes; a mismatch makes
 // the device fall back to defaults rather than read a stale struct.
-constexpr uint32_t kConfigMagic = 0x54494C31;  // "TIL1"
+// TIL2 added the iSpindel slots.
+constexpr uint32_t kConfigMagic = 0x54494C32;  // "TIL2"
 constexpr char kPrefsNamespace[] = "tiltsim";
 constexpr char kPrefsKey[] = "cfg";
 
@@ -67,6 +68,25 @@ void applyDefaults() {
     tilt.gravity = kDefaultGravity[i];
     tilt.tempVarianceF = 2.0f;  // matches the old random(-2, 3) swing
     tilt.gravityVariance = 0.0f;
+  }
+
+  // Off with no endpoint, because an iSpindel with nowhere to post is the only
+  // safe default: enabling one by default would have the device POST to
+  // whatever the previous owner of that URL is now serving.
+  constexpr float kDefaultIspindelTempF[kIspindelCount] = {64, 66, 68, 70};
+  constexpr float kDefaultIspindelGravity[kIspindelCount] = {1.050f, 1.051f,
+                                                             1.052f, 1.053f};
+
+  for (size_t i = 0; i < kIspindelCount; ++i) {
+    IspindelSettings& ispindel = gConfig.ispindels[i];
+    ispindel.enabled = false;
+    snprintf(ispindel.name, sizeof(ispindel.name), "ispindel-%u",
+             static_cast<unsigned>(i + 1));
+    ispindel.url[0] = '\0';
+    ispindel.tempF = kDefaultIspindelTempF[i];
+    ispindel.gravity = kDefaultIspindelGravity[i];
+    ispindel.tempVarianceF = 2.0f;
+    ispindel.gravityVariance = 0.0f;
   }
 }
 
@@ -146,6 +166,9 @@ void configBegin() {
   for (size_t i = 0; i < kTiltCount; ++i) {
     configClampTilt(gConfig.tilts[i]);
   }
+  for (size_t i = 0; i < kIspindelCount; ++i) {
+    configClampIspindel(gConfig.ispindels[i]);
+  }
   Serial.println("Config: loaded from NVS");
 }
 
@@ -154,6 +177,29 @@ void configClampTilt(TiltSettings& tilt) {
   tilt.gravity = clampFloat(tilt.gravity, kMinGravity, kMaxGravity);
   tilt.tempVarianceF = clampFloat(tilt.tempVarianceF, 0.0f, kMaxTempVarianceF);
   tilt.gravityVariance = clampFloat(tilt.gravityVariance, 0.0f, kMaxGravityVariance);
+}
+
+void configClampIspindel(IspindelSettings& ispindel) {
+  ispindel.tempF = clampFloat(ispindel.tempF, kMinTempF, kMaxTempF);
+  ispindel.gravity = clampFloat(ispindel.gravity, kMinGravity, kMaxGravity);
+  ispindel.tempVarianceF =
+      clampFloat(ispindel.tempVarianceF, 0.0f, kMaxTempVarianceF);
+  ispindel.gravityVariance =
+      clampFloat(ispindel.gravityVariance, 0.0f, kMaxGravityVariance);
+
+  // A blob read back from NVS is only as trustworthy as whatever wrote it, and
+  // both of these are handed to string functions afterwards.
+  ispindel.name[sizeof(ispindel.name) - 1] = '\0';
+  ispindel.url[sizeof(ispindel.url) - 1] = '\0';
+}
+
+float randomVariance(const float range) {
+  if (range <= 0.0f) {
+    return 0.0f;
+  }
+  // random() is integer-only, so work in thousandths of the range.
+  const long steps = random(-1000, 1001);
+  return range * (static_cast<float>(steps) / 1000.0f);
 }
 
 void configMarkDirty() {
@@ -198,5 +244,13 @@ void configPrint() {
                   kTiltColours[i].name, tilt.enabled ? "enabled" : "disabled",
                   tilt.pro ? "pro" : "std", tilt.tempF, tilt.tempVarianceF,
                   tilt.gravity, tilt.gravityVariance);
+  }
+  for (size_t i = 0; i < kIspindelCount; ++i) {
+    const IspindelSettings& ispindel = gConfig.ispindels[i];
+    Serial.printf("  %-12s %-8s %6.1f degF +/-%.1f  %.4f SG +/-%.4f  %s\n",
+                  ispindel.name, ispindel.enabled ? "enabled" : "disabled",
+                  ispindel.tempF, ispindel.tempVarianceF, ispindel.gravity,
+                  ispindel.gravityVariance,
+                  ispindel.url[0] != '\0' ? ispindel.url : "(no endpoint)");
   }
 }
