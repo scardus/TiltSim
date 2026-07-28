@@ -13,6 +13,9 @@ constexpr unsigned long kPortalTimeoutSec = 180;
 constexpr unsigned long kReconnectIntervalMs = 30000;
 
 String gHostname;
+// The AP last seen associated, so a change can be reported. Empty until the
+// first connection, which is what stops the first pass logging a "move".
+String gBssid;
 bool gMdnsStarted = false;
 bool gPortalSaved = false;
 unsigned long gLastReconnectMs = 0;
@@ -75,8 +78,12 @@ bool netBegin() {
     return false;
   }
 
-  Serial.printf("WiFi: %s  ip=%s  rssi=%d dBm\n", WiFi.SSID().c_str(),
-                WiFi.localIP().toString().c_str(), WiFi.RSSI());
+  // The BSSID matters as much as the RSSI here: several APs answer for this
+  // SSID, so a weak link is either a near AP fading or an association with a
+  // distant one, and the number alone cannot tell those apart.
+  Serial.printf("WiFi: %s  bssid=%s  ip=%s  rssi=%d dBm\n", WiFi.SSID().c_str(),
+                WiFi.BSSIDstr().c_str(), WiFi.localIP().toString().c_str(),
+                WiFi.RSSI());
 
   // The portal's own web server has been torn down by now, but the browser that
   // submitted the form still has a keep-alive socket to it, and closing that
@@ -102,6 +109,18 @@ void netLoop() {
     // mDNS cannot start until there is an address, so cover the case where the
     // link came up after boot.
     startMdns();
+
+    // A reconnect can land on a different AP than the one booted onto, and
+    // nothing else would say so. Logged only when it changes, so a stable link
+    // stays silent.
+    const String bssid = WiFi.BSSIDstr();
+    if (bssid != gBssid) {
+      if (!gBssid.isEmpty()) {
+        Serial.printf("WiFi: moved from %s to %s, rssi=%d dBm\n", gBssid.c_str(),
+                      bssid.c_str(), WiFi.RSSI());
+      }
+      gBssid = bssid;
+    }
     return;
   }
 
@@ -134,6 +153,13 @@ String netIpAddress() {
     return "0.0.0.0";
   }
   return WiFi.localIP().toString();
+}
+
+String netBssid() {
+  if (!netIsConnected()) {
+    return String();
+  }
+  return WiFi.BSSIDstr();
 }
 
 void netForgetCredentials() {

@@ -145,6 +145,10 @@ void handleState(AsyncWebServerRequest* request) {
   doc["hostname"] = netHostname();
   doc["ip"] = netIpAddress();
   doc["connected"] = netIsConnected();
+  // Which AP, and how well heard. Several APs answer for this SSID, so these
+  // two together are what distinguish a fading link from a poorly chosen one.
+  doc["bssid"] = netBssid();
+  doc["rssi"] = netRssi();
 
   // Which OTA slot is running, and the image hash. An update is only proven to
   // have taken when these change - the build date comes from whichever

@@ -21,5 +21,13 @@ bool netIsConnected();
 int netRssi();
 String netIpAddress();
 
+// Which access point the device is actually associated with, as
+// "aa:bb:cc:dd:ee:ff", or empty when there is no link.
+//
+// Worth reporting on a network with more than one AP on the same SSID: RSSI
+// alone cannot distinguish a near AP fading from the device having associated
+// with a distant one, and those have different fixes.
+String netBssid();
+
 // Forgets the saved credentials and reboots into the captive portal.
 void netForgetCredentials();
