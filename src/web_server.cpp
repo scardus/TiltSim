@@ -373,6 +373,14 @@ bool webServerBegin() {
     requestDeferred(PendingAction::ForgetWifi);
   });
 
+  // Deferred like the others: restarting from a handler starves the AsyncTCP
+  // watchdog and panics before the response can flush, so the browser would
+  // never learn the reboot was accepted.
+  gServer.on("/api/reboot", HTTP_POST, [](AsyncWebServerRequest* request) {
+    request->send(200, "application/json", "{\"ok\":true}");
+    requestDeferred(PendingAction::Restart);
+  });
+
   gServer.onNotFound([](AsyncWebServerRequest* request) {
     request->send(404, "text/plain", "Not found");
   });

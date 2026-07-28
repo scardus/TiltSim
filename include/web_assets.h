@@ -23,7 +23,9 @@ h1{font-size:19px;margin:0;letter-spacing:.2px}
 .dot{display:inline-block;width:8px;height:8px;border-radius:50%;
 margin-right:6px;vertical-align:1px}
 .dot.up{background:var(--ok)}.dot.down{background:var(--bad)}
-nav{display:flex;gap:8px}
+/* Anchors the dropdown, which is positioned against this rather than the page
+so it stays under the button when the header reflows on a narrow screen. */
+nav{display:flex;gap:8px;position:relative}
 .btn{background:var(--card2);color:var(--fg);border:1px solid var(--line);
 padding:8px 14px;border-radius:8px;cursor:pointer;font-size:14px;
 text-decoration:none;
@@ -35,6 +37,20 @@ font-family:inherit;line-height:1.4;
 display:inline-flex;align-items:center;justify-content:center}
 .btn:hover{border-color:var(--accent)}
 .btn.danger:hover{border-color:var(--bad);color:var(--bad)}
+/* Square, so the icon sits centred rather than in a text-width pill. */
+.btn.icon{padding:8px 11px}
+.menu{position:absolute;right:0;top:calc(100% + 6px);min-width:190px;
+background:var(--card2);border:1px solid var(--line);border-radius:10px;
+padding:6px;z-index:20;box-shadow:0 10px 28px rgba(0,0,0,.45);display:none}
+.menu.open{display:block}
+.menu a,.menu button{display:block;width:100%;text-align:left;background:none;
+border:0;border-radius:7px;color:var(--fg);font-family:inherit;font-size:14px;
+line-height:1.4;padding:10px 12px;cursor:pointer;text-decoration:none}
+.menu a:hover,.menu button:hover{background:var(--card)}
+/* Separated and coloured because it interrupts everything the device is doing,
+unlike the two entries above it. */
+.menu .danger{color:var(--bad);border-top:1px solid var(--line);
+border-radius:0 0 7px 7px;margin-top:6px;padding-top:12px}
 .master{display:flex;align-items:center;gap:12px}
 .grid{display:grid;gap:14px;grid-template-columns:repeat(auto-fill,minmax(300px,1fr))}
 /* The inset highlight keeps the Black tilt's #2b2b2b edge legible against the
@@ -86,7 +102,10 @@ border-radius:20px;font-size:14px;opacity:0;transition:.2s;pointer-events:none}
 #toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
 #toast.err{background:var(--bad)}
 @media(max-width:520px){header{flex-direction:column;align-items:stretch}
-nav{justify-content:stretch}.btn{flex:1;text-align:center}}
+nav{justify-content:stretch}.btn{flex:1;text-align:center}
+/* The stretch rule above is for full-width text buttons; a hamburger stretched
+across the header reads as a banner rather than a control. */
+.btn.icon{flex:0 0 auto;align-self:flex-start}}
 )CSS";
 
 const char kIndexHtml[] PROGMEM = R"HTML(
@@ -110,8 +129,17 @@ const char kIndexHtml[] PROGMEM = R"HTML(
       <button type="button" data-u="C">°C</button>
     </div>
   </div>
-  <nav><a class="btn" href="/ota">Firmware</a>
-  <button class="btn danger" id="forget">Forget WiFi</button></nav>
+  <nav>
+    <button class="btn icon" id="menubtn" aria-label="Menu" aria-haspopup="true"
+      aria-expanded="false"><svg viewBox="0 0 24 24" width="18" height="18"
+      aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2"
+      stroke-linecap="round"><path d="M3 6h18M3 12h18M3 18h18"/></svg></button>
+    <div class="menu" id="menu" role="menu">
+      <a href="/ota" role="menuitem">Firmware</a>
+      <button type="button" id="forget" role="menuitem">Forget WiFi</button>
+      <button type="button" id="reboot" class="danger" role="menuitem">Reboot Device</button>
+    </div>
+  </nav>
 </header>
 <div class="grid" id="grid"></div>
 <footer id="foot"></footer>
@@ -330,10 +358,29 @@ $('units').addEventListener('click',e=>{
   if(state)render();
 });
 
+function closeMenu(){$('menu').classList.remove('open');
+  $('menubtn').setAttribute('aria-expanded','false');}
+
+$('menubtn').addEventListener('click',e=>{
+  e.stopPropagation();  // Or the document handler below closes it again.
+  const open=$('menu').classList.toggle('open');
+  $('menubtn').setAttribute('aria-expanded',open?'true':'false');
+});
+document.addEventListener('click',closeMenu);
+document.addEventListener('keydown',e=>{if(e.key==='Escape')closeMenu();});
+
 $('forget').addEventListener('click',()=>{
+  closeMenu();
   if(!confirm('Forget the saved WiFi network and reboot into the setup portal?'))return;
   fetch('/api/reset-wifi',{method:'POST'});
   toast('Rebooting into setup portal');
+});
+
+$('reboot').addEventListener('click',()=>{
+  closeMenu();
+  if(!confirm('Reboot the device now? Advertising stops until it is back.'))return;
+  fetch('/api/reboot',{method:'POST'});
+  toast('Rebooting',0,3000);
 });
 
 load();

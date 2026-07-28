@@ -176,6 +176,7 @@ follow, and breaking either one is a real fault rather than a style point:
 | POST | `/api/master` | `{"enabled": true\|false}` |
 | POST | `/api/tilt/<0-7>` | Partial patch of one tilt's settings |
 | POST | `/api/reset-wifi` | Forget credentials and reboot into the portal |
+| POST | `/api/reboot` | Restart the device, keeping its settings |
 | POST | `/update` | Multipart firmware upload |
 
 Patches are partial — send only the fields you are changing. Values are clamped
