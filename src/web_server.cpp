@@ -11,6 +11,7 @@
 #include <initializer_list>
 
 #include "heap.h"
+#include "ispindel.h"
 #include "net.h"
 #include "ota_rollback.h"
 #include "tilt_config.h"
@@ -43,6 +44,11 @@ constexpr size_t kPatchHeadroomBytes = 1536;
 // never gets a say. The largest real body is a single-field patch, well under
 // 100 bytes.
 constexpr size_t kMaxJsonBodyBytes = 256;
+
+// The iSpindel slots need more: their URL field alone holds 127 characters, and
+// a caller setting several fields at once is entitled to do so. Still two
+// orders of magnitude below the library's default.
+constexpr size_t kMaxIspindelBodyBytes = 512;
 
 // Refusing a request costs a browser one retry. Attempting one without the room
 // to finish it costs a reboot: operator new throws std::bad_alloc, nothing in
@@ -99,6 +105,20 @@ constexpr unsigned long kBindRetryMs = 5000;
 // Handlers below run on the AsyncTCP task, so every touch of gConfig is inside
 // configLock()/configUnlock() and persisting is left to loop().
 
+void addIspindelJson(JsonObject obj, const size_t index,
+                     const IspindelSettings& ispindel) {
+  // The ID is derived from the board's MAC rather than stored, so it is sent
+  // for display only; there is no patch field for it.
+  obj["id"] = ispindelIdFor(index);
+  obj["name"] = ispindel.name;
+  obj["url"] = ispindel.url;
+  obj["enabled"] = ispindel.enabled;
+  obj["tempF"] = ispindel.tempF;
+  obj["gravity"] = ispindel.gravity;
+  obj["tempVarianceF"] = ispindel.tempVarianceF;
+  obj["gravityVariance"] = ispindel.gravityVariance;
+}
+
 void addTiltJson(JsonObject obj, const size_t index, const TiltSettings& tilt) {
   obj["name"] = kTiltColours[index].name;
   obj["swatch"] = kTiltColours[index].swatch;
@@ -154,6 +174,11 @@ void handleState(AsyncWebServerRequest* request) {
   // a library update rather than trusting a measurement taken once.
   doc["tcpStackFree"] = uxTaskGetStackHighWaterMark(nullptr);
 
+  // The same for the iSpindel poster, which takes a much larger stack from the
+  // same heap. 0 until it has run a round, and while no endpoint is configured
+  // it never starts at all.
+  doc["ispindelStackFree"] = ispindelStackFree();
+
   // Snapshot under the lock, build the JSON outside it. Each insert below can
   // allocate, and doing ~70 of them against a fragmented heap while holding the
   // lock blocked loop()'s buildSchedule() and every other handler for the
@@ -171,6 +196,10 @@ void handleState(AsyncWebServerRequest* request) {
   const JsonArray tilts = doc["tilts"].to<JsonArray>();
   for (size_t i = 0; i < kTiltCount; ++i) {
     addTiltJson(tilts.add<JsonObject>(), i, config.tilts[i]);
+  }
+  const JsonArray ispindels = doc["ispindels"].to<JsonArray>();
+  for (size_t i = 0; i < kIspindelCount; ++i) {
+    addIspindelJson(ispindels.add<JsonObject>(), i, config.ispindels[i]);
   }
 
   // Streamed rather than serialised into a String and handed to send(), which
@@ -252,6 +281,85 @@ void handleTiltPatch(AsyncWebServerRequest* request, const size_t index,
 
   JsonDocument doc;
   addTiltJson(doc.to<JsonObject>(), index, updated);
+
+  AsyncResponseStream* response =
+      request->beginResponseStream("application/json", kPatchBufferBytes);
+  serializeJson(doc, *response);
+  finishResponse(request, response);
+}
+
+// Rejected rather than clamped, unlike the numeric fields: there is no sensible
+// nearest-valid-URL to snap to, and silently dropping the edit would leave the
+// box showing something the device is not using.
+const char* urlProblem(const char* url) {
+  if (url[0] == '\0') {
+    return nullptr;  // Empty is how a slot is left unconfigured.
+  }
+  if (strncmp(url, "http://", 7) == 0 || strncmp(url, "https://", 8) == 0) {
+    return nullptr;
+  }
+  return "URL must start with http:// or https://";
+}
+
+void handleIspindelPatch(AsyncWebServerRequest* request, const size_t index,
+                         const JsonVariant& body) {
+  if (index >= kIspindelCount) {
+    request->send(404, "text/plain", "No such iSpindel");
+    return;
+  }
+  if (!haveHeadroom(request, kPatchHeadroomBytes)) {
+    return;
+  }
+
+  // Validated before the lock is taken, so a bad URL cannot leave a
+  // half-applied patch behind.
+  if (body["url"].is<const char*>()) {
+    const char* problem = urlProblem(body["url"].as<const char*>());
+    if (problem != nullptr) {
+      request->send(400, "text/plain", problem);
+      return;
+    }
+  }
+
+  if (!configLock()) {
+    sendBusy(request);
+    return;
+  }
+  IspindelSettings& ispindel = gConfig.ispindels[index];
+  if (body["enabled"].is<bool>()) {
+    ispindel.enabled = body["enabled"].as<bool>();
+  }
+  if (body["name"].is<const char*>()) {
+    strlcpy(ispindel.name, body["name"].as<const char*>(), sizeof(ispindel.name));
+  }
+  if (body["url"].is<const char*>()) {
+    strlcpy(ispindel.url, body["url"].as<const char*>(), sizeof(ispindel.url));
+  }
+  if (body["tempF"].is<float>()) {
+    ispindel.tempF = body["tempF"].as<float>();
+  }
+  if (body["gravity"].is<float>()) {
+    ispindel.gravity = body["gravity"].as<float>();
+  }
+  if (body["tempVarianceF"].is<float>()) {
+    ispindel.tempVarianceF = body["tempVarianceF"].as<float>();
+  }
+  if (body["gravityVariance"].is<float>()) {
+    ispindel.gravityVariance = body["gravityVariance"].as<float>();
+  }
+  // Never trust the browser: clamp whatever arrived back into range.
+  configClampIspindel(ispindel);
+
+  const IspindelSettings updated = ispindel;
+  configMarkDirty();
+  configUnlock();
+
+  // Outside the lock: this can start the posting task, which allocates a stack,
+  // and anySlotConfigured() takes the lock itself.
+  ispindelNoteConfigChanged();
+
+  JsonDocument doc;
+  addIspindelJson(doc.to<JsonObject>(), index, updated);
 
   AsyncResponseStream* response =
       request->beginResponseStream("application/json", kPatchBufferBytes);
@@ -660,6 +768,21 @@ bool webServerBegin() {
           handleTiltPatch(request, i, body);
         });
     handler->setMaxContentLength(kMaxJsonBodyBytes);
+    gServer.addHandler(handler);
+  }
+
+  // The same shape for the iSpindel slots, with a larger cap: a single-field
+  // patch here can carry a 127-character URL, where the largest tilt patch is a
+  // float.
+  for (size_t i = 0; i < kIspindelCount; ++i) {
+    static char ispindelPaths[kIspindelCount][20];
+    snprintf(ispindelPaths[i], sizeof(ispindelPaths[i]), "/api/ispindel/%u",
+             static_cast<unsigned>(i));
+    auto* handler = new AsyncCallbackJsonWebHandler(
+        ispindelPaths[i], [i](AsyncWebServerRequest* request, JsonVariant& body) {
+          handleIspindelPatch(request, i, body);
+        });
+    handler->setMaxContentLength(kMaxIspindelBodyBytes);
     gServer.addHandler(handler);
   }
 
