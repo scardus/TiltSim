@@ -246,6 +246,37 @@ void test_addresses_are_stable_and_device_specific() {
   TEST_ASSERT_FALSE(first == otherBoard);
 }
 
+void test_addresses_reverse_into_the_order_the_stack_expects() {
+  // The regression this guards is the Bluedroid-to-NimBLE swap: the two stacks
+  // take the six bytes in opposite orders, and the addresses are part of the
+  // wire format the receiver keys its discovery list on.
+  const uint8_t base[kBleAddressLen] = {0x24, 0x0A, 0xC4, 0xC2, 0xA0, 0x80};
+  BleAddress printed;
+  TEST_ASSERT_TRUE(tiltBleAddress(base, 5, printed));
+
+  BleAddress little;
+  bleAddressLittleEndian(printed, little);
+
+  // ble_hs_id_set_rnd() reads the static-random marker from the last byte and
+  // rejects the address without it, which stops advertising entirely.
+  TEST_ASSERT_EQUAL_UINT8(0xC0, little[kBleAddressLen - 1] & 0xC0);
+  // The colour index travels the other way, from the last byte to the first.
+  TEST_ASSERT_EQUAL_UINT8(printed[kBleAddressLen - 1], little[0]);
+
+  // Reversing twice is the identity, so the printed order the serial log shows
+  // is still the address that went on air.
+  BleAddress roundTrip;
+  bleAddressLittleEndian(little, roundTrip);
+  TEST_ASSERT_EQUAL_UINT8_ARRAY(printed.data(), roundTrip.data(),
+                                kBleAddressLen);
+
+  // In place, which is the aliasing case the copy inside exists for.
+  BleAddress inPlace;
+  bleAddressLittleEndian(printed, inPlace);
+  bleAddressLittleEndian(inPlace, inPlace);
+  TEST_ASSERT_EQUAL_UINT8_ARRAY(printed.data(), inPlace.data(), kBleAddressLen);
+}
+
 void test_address_rejects_bad_input() {
   BleAddress addr;
   const uint8_t base[kBleAddressLen] = {0x24, 0x0A, 0xC4, 0xC2, 0xA0, 0x80};
@@ -274,6 +305,7 @@ void setup() {
   RUN_TEST(test_addresses_are_valid_static_random);
   RUN_TEST(test_addresses_are_distinct_for_every_colour);
   RUN_TEST(test_addresses_are_stable_and_device_specific);
+  RUN_TEST(test_addresses_reverse_into_the_order_the_stack_expects);
   RUN_TEST(test_address_rejects_bad_input);
   UNITY_END();
 }

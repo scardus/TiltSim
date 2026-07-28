@@ -135,6 +135,15 @@ bool tiltBleAddress(const uint8_t* baseMac, const size_t colourIndex,
   return true;
 }
 
+void bleAddressLittleEndian(const BleAddress& printedOrder, BleAddress& out) {
+  // Copied first so a caller may pass the same array as both arguments; a
+  // straight reverse in place would overwrite bytes it has yet to read.
+  const BleAddress in = printedOrder;
+  for (size_t i = 0; i < kBleAddressLen; ++i) {
+    out[i] = in[kBleAddressLen - 1 - i];
+  }
+}
+
 void efuseMacBytes(const uint64_t efuseMac, BleAddress& out) {
   for (size_t i = 0; i < kBleAddressLen; ++i) {
     out[i] = static_cast<uint8_t>((efuseMac >> (8 * i)) & 0xFF);

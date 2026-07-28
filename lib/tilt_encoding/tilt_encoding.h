@@ -138,6 +138,26 @@ using BleAddress = std::array<uint8_t, kBleAddressLen>;
 // untouched, for a null pointer or a colourIndex past the last colour.
 bool tiltBleAddress(const uint8_t* baseMac, size_t colourIndex, BleAddress& out);
 
+// The same six bytes in the order the radio sends them: least significant
+// first.
+//
+// tiltBleAddress() above returns an address the way it is written down and
+// printed, most significant byte first -- which is also the order Bluedroid's
+// esp_bd_addr_t took, so for a long time no conversion existed here. NimBLE
+// takes the opposite order, straight through to the HCI command:
+// ble_hs_id_set_rnd() looks for the static-random marker in byte 5, not byte 0.
+//
+// Feeding it the printed order fails in two different ways depending on the
+// board's MAC. Usually the marker check fails and the address is rejected, so
+// nothing advertises at all; but on a MAC whose last byte happens to have both
+// top bits set it is accepted, and every colour then airs from a reversed
+// address no receiver has ever seen. Neither failure looks like a byte-order
+// bug from the outside, which is why the conversion is a named function with a
+// test rather than a reverse loop at the call site.
+//
+// out may alias printedOrder.
+void bleAddressLittleEndian(const BleAddress& printedOrder, BleAddress& out);
+
 // Unpacks the value ESP.getEfuseMac() returns into six bytes.
 //
 // That call packs the factory MAC with byte 0 in the low bits, so this reads out
