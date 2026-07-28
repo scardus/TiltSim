@@ -167,12 +167,19 @@ follow, and breaking either one is a real fault rather than a style point:
 - Never call `delay()` or `ESP.restart()` from a handler. That task is
   watchdogged; doing so panics the device before the response can flush.
   Handlers set a flag and `loop()` acts on it.
+- Never hand a whole embedded asset to `beginResponse(code, type, body)`. That
+  overload copies the body into a `String`, so a 9 KB page needs a 9 KB
+  contiguous allocation — and `/api/state` reports the largest free block a
+  running device can actually offer. Serve assets through `sendProgmem()`, which
+  streams them from flash a TCP buffer at a time. When this was got wrong the
+  symptom was not an error but the large pages hanging with no response while
+  the small endpoints kept working, which reads as a crashing server.
 
 ## HTTP API
 
 | Method | Path | Purpose |
 |---|---|---|
-| GET | `/api/state` | Full config plus hostname, IP, version, OTA slot, image hash |
+| GET | `/api/state` | Full config plus hostname, IP, version, OTA slot, image hash, free heap |
 | POST | `/api/master` | `{"enabled": true\|false}` |
 | POST | `/api/tilt/<0-7>` | Partial patch of one tilt's settings |
 | POST | `/api/reset-wifi` | Forget credentials and reboot into the portal |

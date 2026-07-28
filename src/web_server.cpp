@@ -6,6 +6,7 @@
 #include <esp_ota_ops.h>
 #include <lwip/sockets.h>
 
+#include "heap.h"
 #include "net.h"
 #include "tilt_config.h"
 #include "tilt_encoding.h"
@@ -60,6 +61,14 @@ void handleState(AsyncWebServerRequest* request) {
   const esp_partition_t* running = esp_ota_get_running_partition();
   doc["partition"] = running != nullptr ? running->label : "?";
   doc["sketchMd5"] = ESP.getSketchMD5();
+
+  // Free heap and the largest single block it can still hand out. The second
+  // number is the one that matters: fragmentation is what stops a large
+  // allocation, and it is invisible from the total alone. Both are here because
+  // a heap problem presented as "the web server keeps crashing", and there was
+  // no way to see the real cause from outside the device.
+  doc["heapFree"] = ESP.getFreeHeap();
+  doc["heapLargestBlock"] = largestUsableBlock();
 
   if (!configLock()) {
     sendBusy(request);
@@ -240,9 +249,29 @@ void handleUploadDone(AsyncWebServerRequest* request) {
   requestDeferred(PendingAction::Restart);
 }
 
+// Streams an embedded asset straight out of flash, a TCP buffer at a time.
+//
+// The obvious call, beginResponse(200, type, body), looks like it reads the
+// PROGMEM directly -- and it does read it, but AsyncBasicResponse stores the
+// body in a String (WebResponses.cpp: `_content = content`), so serving app.js
+// asks the allocator for one contiguous multi-kilobyte block per request,
+// against a largest free block that /api/state now reports. Once that
+// allocation fails the request simply hangs with no response, while small
+// endpoints like /api/state carry on working -- which is what made it look
+// like the server was crashing rather than running out of room. It also got
+// steadily worse as the page grew.
+//
+// The filler copies ~1.4 KB at a time into the buffer the stack already owns,
+// so the cost no longer scales with the size of the asset.
 void sendProgmem(AsyncWebServerRequest* request, const char* type, const char* body) {
-  // PROGMEM is flash-mapped on ESP32, so the plain overload reads it directly.
-  AsyncWebServerResponse* response = request->beginResponse(200, type, body);
+  const size_t len = strlen(body);
+  AsyncWebServerResponse* response = request->beginResponse(
+      type, len, [body, len](uint8_t* buffer, size_t maxLen, size_t index) -> size_t {
+        const size_t remaining = len - index;
+        const size_t chunk = remaining < maxLen ? remaining : maxLen;
+        memcpy(buffer, body + index, chunk);
+        return chunk;
+      });
   response->addHeader("Cache-Control", "no-cache");
   request->send(response);
 }
