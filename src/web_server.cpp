@@ -7,6 +7,8 @@
 #include <lwip/sockets.h>
 
 #include <atomic>
+#include <cstring>
+#include <initializer_list>
 
 #include "heap.h"
 #include "net.h"
@@ -405,19 +407,73 @@ void handleUploadDone(AsyncWebServerRequest* request) {
 //
 // The filler copies ~1.4 KB at a time into the buffer the stack already owns,
 // so the cost no longer scales with the size of the asset.
-void sendProgmem(AsyncWebServerRequest* request, const char* type, const char* body) {
+// A page assembled from several flash strings, served as one response.
+//
+// The parts exist so the stylesheet is stored once and still emitted into both
+// pages: the alternative, a literal copy in each, costs ~6 KB of flash on a
+// build already at 90% of its slot.
+constexpr size_t kMaxAssetParts = 5;
+struct Asset {
+  const char* parts[kMaxAssetParts];
+  size_t lengths[kMaxAssetParts];
+  size_t count;
+  size_t total;
+};
+
+Asset makeAsset(std::initializer_list<const char*> parts) {
+  Asset asset = {};
+  for (const char* part : parts) {
+    if (asset.count >= kMaxAssetParts) {
+      break;
+    }
+    asset.parts[asset.count] = part;
+    asset.lengths[asset.count] = strlen(part);
+    asset.total += asset.lengths[asset.count];
+    ++asset.count;
+  }
+  return asset;
+}
+
+// Streams an embedded asset straight out of flash, a TCP buffer at a time.
+//
+// The obvious call, beginResponse(200, type, body), looks like it reads the
+// PROGMEM directly -- and it does read it, but AsyncBasicResponse stores the
+// body in a String (WebResponses.cpp: `_content = content`), so serving the page
+// asks the allocator for one contiguous multi-kilobyte block per request,
+// against a largest free block that /api/state now reports. Once that
+// allocation fails the request simply hangs with no response, while small
+// endpoints like /api/state carry on working -- which is what made it look
+// like the server was crashing rather than running out of room. It also got
+// steadily worse as the page grew.
+//
+// The filler copies ~1.4 KB at a time into the buffer the stack already owns,
+// so the cost no longer scales with the size of the asset -- which is what makes
+// inlining the CSS and JS into the page affordable.
+void sendAsset(AsyncWebServerRequest* request, const char* type,
+               const Asset& asset) {
   // Cheap next to the JSON handlers -- the body never lands on the heap -- but
-  // the response object and its header String still have to be allocated, and
-  // an asset request is usually one of several arriving at once.
+  // the response object and its header String still have to be allocated.
   if (!haveHeadroom(request, kPatchHeadroomBytes)) {
     return;
   }
-  const size_t len = strlen(body);
+  const Asset* a = &asset;
   AsyncWebServerResponse* response = request->beginResponse(
-      type, len, [body, len](uint8_t* buffer, size_t maxLen, size_t index) -> size_t {
-        const size_t remaining = len - index;
+      type, asset.total, [a](uint8_t* buffer, size_t maxLen, size_t index) -> size_t {
+        // Walk to the part holding this offset. The library accumulates what we
+        // return and passes it back as index, so a short fill at a part
+        // boundary is picked up correctly on the next call.
+        size_t offset = index;
+        size_t part = 0;
+        while (part < a->count && offset >= a->lengths[part]) {
+          offset -= a->lengths[part];
+          ++part;
+        }
+        if (part >= a->count) {
+          return 0;
+        }
+        const size_t remaining = a->lengths[part] - offset;
         const size_t chunk = remaining < maxLen ? remaining : maxLen;
-        memcpy(buffer, body + index, chunk);
+        memcpy(buffer, a->parts[part] + offset, chunk);
         return chunk;
       });
   response->addHeader("Cache-Control", "no-cache");
@@ -525,18 +581,22 @@ void webServerLoop() {
 bool webServerBegin() {
   gUpdateMutex = xSemaphoreCreateMutex();
 
+  // Both pages carry their CSS and JS inline, so a page load is two connections
+  // (the page and /api/state) rather than five. Five concurrent connections is
+  // what fragmented the heap far enough to start refusing requests, and there
+  // are no separate /style.css or /app.js routes any more because nothing asks
+  // for them -- the favicon link in each page is a data: URI for the same
+  // reason, since a 404 still costs a whole connection to deliver.
+  static const Asset indexPage =
+      makeAsset({kIndexHead, kStyleCss, kIndexMid, kAppJs, kIndexTail});
+  static const Asset otaPage = makeAsset({kOtaHead, kStyleCss, kOtaTail});
+
   gServer.on("/", HTTP_GET, [](AsyncWebServerRequest* request) {
-    sendProgmem(request, "text/html", kIndexHtml);
-  });
-  gServer.on("/style.css", HTTP_GET, [](AsyncWebServerRequest* request) {
-    sendProgmem(request, "text/css", kStyleCss);
-  });
-  gServer.on("/app.js", HTTP_GET, [](AsyncWebServerRequest* request) {
-    sendProgmem(request, "application/javascript", kAppJs);
+    sendAsset(request, "text/html", indexPage);
   });
 
   gServer.on("/ota", HTTP_GET, [](AsyncWebServerRequest* request) {
-    sendProgmem(request, "text/html", kOtaHtml);
+    sendAsset(request, "text/html", otaPage);
   });
   gServer.on("/update", HTTP_POST, handleUploadDone, handleUploadChunk);
 
