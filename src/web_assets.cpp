@@ -47,7 +47,10 @@ extern const char kIndexMid[] = R"HTML(</style>
     </div>
   </nav>
 </header>
+<h2 class="section">Tilt Configuration</h2>
 <div class="grid" id="grid"></div>
+<h2 class="section">iSpindel Configuration</h2>
+<div class="grid" id="igrid"></div>
 <footer id="foot"></footer>
 </div><div id="toast"></div>
 <script>)HTML";
@@ -193,11 +196,18 @@ box-shadow:0 0 0 1px rgba(255,255,255,.35)}
 .top{display:flex;justify-content:space-between;align-items:center;
 margin-bottom:12px;gap:8px}
 .row{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:10px}
+/* Name and URL need the whole card width; a URL in half a card is unreadable. */
+.row.one{grid-template-columns:1fr}
 label{display:block;font-size:12px;color:var(--muted);margin-bottom:4px}
-input[type=number]{width:100%;background:var(--card2);color:var(--fg);
-border:1px solid var(--line);border-radius:8px;padding:8px;font-size:15px;
-font-variant-numeric:tabular-nums}
-input[type=number]:focus{outline:none;border-color:var(--accent)}
+input[type=number],input[type=text]{width:100%;background:var(--card2);
+color:var(--fg);border:1px solid var(--line);border-radius:8px;padding:8px;
+font-size:15px;font-variant-numeric:tabular-nums}
+input[type=text]{font-variant-numeric:normal}
+input:focus{outline:none;border-color:var(--accent)}
+/* Section headings sit outside the card grid, so they need their own rhythm. */
+.section{font-size:15px;margin:22px 0 12px;color:var(--muted);
+text-transform:uppercase;letter-spacing:.7px;font-weight:600}
+.section:first-of-type{margin-top:0}
 .wire{font-size:12px;color:var(--muted);font-variant-numeric:tabular-nums;
 border-top:1px dashed var(--line);padding-top:9px;margin-top:2px}
 .wire b{color:var(--fg);font-weight:600}
@@ -260,6 +270,11 @@ const f2cDelta=d=>d*5/9, c2fDelta=d=>d*9/5;
 let units=localStorage.getItem('units')==='C'?'C':'F';
 const isC=()=>units==='C';
 
+// The name and URL are user text dropped into an innerHTML template, so a quote
+// in either would otherwise break out of the value attribute.
+const esc=s=>String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;')
+  .replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+
 function card(t,i){
   const c=document.createElement('div');
   c.className='card'+(t.enabled?'':' off');
@@ -289,18 +304,67 @@ function card(t,i){
   <div class="wire">on air: major <b>${enc(t.tempF,t.pro,0)}</b>
     · minor <b>${enc(t.gravity,t.pro,1)}</b></div>`;
 
+  wire(c,'tilt',i);
+  return c;
+}
+
+// One iSpindel slot. Same shape as a tilt card minus the Pro toggle, plus the
+// name and endpoint the tilts have no equivalent of.
+function icard(s,i){
+  const c=document.createElement('div');
+  c.className='card'+(s.enabled?'':' off');
+  // .card draws its left edge from --sw. Without one set the border computes to
+  // nothing, so iSpindels borrow the accent colour rather than a swatch.
+  c.style.setProperty('--sw','var(--accent)');
+  c.innerHTML=`<div class="top">
+    <h2>${esc(s.name)||'iSpindel '+(i+1)}</h2>
+    <div class="master">
+      <span class="power">Power <label class="tog sm"><input type="checkbox" data-f="enabled"
+        ${s.enabled?'checked':''}><span class="sl"></span></label></span>
+    </div></div>
+  <div class="row one">
+    <div><label>Name</label><input type="text" data-f="name" maxlength="31"
+      value="${esc(s.name)}"></div>
+  </div>
+  <div class="row one">
+    <div><label>Post to</label><input type="text" data-f="url" maxlength="127"
+      placeholder="http://192.168.0.20:8080/ispindel" value="${esc(s.url)}"></div>
+  </div>
+  <div class="row">
+    <div><label>Temperature °${units}</label><input type="number" data-f="tempF"
+      step="${isC()?0.1:1}" min="-40" max="${isC()?121.1:250}"
+      value="${(isC()?f2c(s.tempF):s.tempF).toFixed(isC()?1:0)}"></div>
+    <div><label>Variance ±°${units}</label><input type="number" data-f="tempVarianceF"
+      step="0.1" min="0" max="${isC()?11.1:20}"
+      value="${(isC()?f2cDelta(s.tempVarianceF):s.tempVarianceF).toFixed(1)}"></div>
+  </div>
+  <div class="row">
+    <div><label>Gravity SG</label><input type="number" data-f="gravity"
+      step="0.001" min="0.9" max="2" value="${s.gravity.toFixed(3)}"></div>
+    <div><label>Variance ±SG</label><input type="number" data-f="gravityVariance"
+      step="0.0001" min="0" max="0.1" value="${s.gravityVariance.toFixed(4)}"></div>
+  </div>
+  <div class="wire">posts as <b>${s.id}</b> every 15 min · always °F on the wire</div>`;
+
+  wire(c,'ispindel',i);
+  return c;
+}
+
+// Shared by both card types: every field posts itself on change.
+function wire(c,kind,i){
   c.querySelectorAll('[data-f]').forEach(el=>{
     el.addEventListener('change',()=>{
       const f=el.dataset.f;
-      let v=el.type==='checkbox'?el.checked:parseFloat(el.value);
-      if(el.type!=='checkbox'&&isNaN(v)){toast('Not a number',1);return;}
+      if(el.type==='checkbox'){send(kind,i,{[f]:el.checked});return;}
+      if(el.type==='text'){send(kind,i,{[f]:el.value});return;}
+      let v=parseFloat(el.value);
+      if(isNaN(v)){toast('Not a number',1);return;}
       // The device stores degF, so convert back out of the display units.
       if(isC()&&f==='tempF')v=c2f(v);
       if(isC()&&f==='tempVarianceF')v=c2fDelta(v);
-      send(i,{[f]:v});
+      send(kind,i,{[f]:v});
     });
   });
-  return c;
 }
 
 function render(){
@@ -312,6 +376,8 @@ function render(){
   $('foot').textContent=state.name+' v'+state.version+' · built '+state.built;
   const g=$('grid');g.innerHTML='';
   state.tilts.forEach((t,i)=>g.appendChild(card(t,i)));
+  const ig=$('igrid');ig.innerHTML='';
+  state.ispindels.forEach((s,i)=>ig.appendChild(icard(s,i)));
 }
 
 async function load(){
@@ -339,13 +405,14 @@ function clampNote(patch,t){
   return null;
 }
 
-async function send(i,patch){
+async function send(kind,i,patch){
+  const list=kind==='tilt'?state.tilts:state.ispindels;
   try{
-    const r=await fetch('/api/tilt/'+i,{method:'POST',
+    const r=await fetch('/api/'+kind+'/'+i,{method:'POST',
       headers:{'Content-Type':'application/json'},body:JSON.stringify(patch)});
     if(!r.ok)throw new Error(await r.text());
-    state.tilts[i]=await r.json();
-    const note=clampNote(patch,state.tilts[i]);
+    list[i]=await r.json();
+    const note=clampNote(patch,list[i]);
     render();
     note?toast(note,1,2600):toast('Saved');
   }catch(e){toast(e.message||'Save failed',1);load();}
