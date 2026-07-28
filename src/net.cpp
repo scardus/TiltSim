@@ -108,6 +108,13 @@ bool netIsConnected() {
   return WiFi.status() == WL_CONNECTED;
 }
 
+int netRssi() {
+  if (!netIsConnected()) {
+    return 0;
+  }
+  return WiFi.RSSI();
+}
+
 String netIpAddress() {
   if (!netIsConnected()) {
     return "0.0.0.0";

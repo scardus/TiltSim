@@ -15,6 +15,10 @@ bool netBegin();
 void netLoop();
 
 bool netIsConnected();
+
+// Signal strength in dBm, or 0 when there is no link. Kept here so callers do
+// not have to pull in WiFi.h just to read it.
+int netRssi();
 String netIpAddress();
 
 // Forgets the saved credentials and reboots into the captive portal.

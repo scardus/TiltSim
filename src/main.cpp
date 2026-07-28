@@ -4,6 +4,7 @@
 
 #include <string>
 
+#include "heap.h"
 #include "net.h"
 #include "tilt_config.h"
 #include "tilt_encoding.h"
@@ -31,6 +32,44 @@ size_t gScheduleCount = 0;
 // visits each colour several times.
 IBeaconPayload gPayloads[kTiltCount];
 BleAddress gAddresses[kTiltCount];
+
+// Often enough to watch a leak develop, rare enough not to bury the per-cycle
+// colour lines.
+constexpr unsigned long kHealthIntervalMs = 30000;
+unsigned long gLastHealthMs = 0;
+
+// Periodic health line. Heap is the tighter constraint on this device than
+// flash: serving the web UI needs contiguous kilobytes, and running out of them
+// presents as the server hanging rather than as an error, so it is worth being
+// able to watch the numbers move.
+void logHealth(const unsigned long now) {
+  if (now - gLastHealthMs < kHealthIntervalMs) {
+    return;
+  }
+  gLastHealthMs = now;
+
+  const uint32_t freeHeap = ESP.getFreeHeap();
+  const uint32_t largest = largestUsableBlock();
+  // ESP32's core has no getHeapFragmentation(), so derive it: the share of free
+  // heap that is not in one piece. A high number means an allocation well under
+  // the free total can still fail, which is exactly the failure that is hard to
+  // diagnose from the outside.
+  const uint32_t fragmentation =
+      freeHeap > 0 ? 100 - (largest * 100 / freeHeap) : 0;
+  // The low-water mark, because a reading taken after the fact misses a
+  // transient dip -- and a transient dip is what a burst of requests causes.
+  const uint32_t minEver = ESP.getMinFreeHeap();
+
+  if (netIsConnected()) {
+    Serial.printf("[HEALTH] Free heap: %u bytes, Largest contiguous: %u bytes, "
+                  "Fragmentation: %u%%, Min ever: %u bytes | WiFi RSSI: %d dBm\n",
+                  freeHeap, largest, fragmentation, minEver, netRssi());
+  } else {
+    Serial.printf("[HEALTH] Free heap: %u bytes, Largest contiguous: %u bytes, "
+                  "Fragmentation: %u%%, Min ever: %u bytes | WiFi: offline\n",
+                  freeHeap, largest, fragmentation, minEver);
+  }
+}
 
 float randomOffset(const float range) {
   if (range <= 0.0f) {
@@ -203,6 +242,7 @@ void loop() {
   configFlushIfDue();
   netLoop();
   webServerLoop();
+  logHealth(now);
 
   // Leave the radio and CPU to the upload; it reboots when it finishes.
   if (webOtaInProgress()) {
