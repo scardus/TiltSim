@@ -1,6 +1,8 @@
 #include <Arduino.h>
 #include <BLEAdvertising.h>
 #include <BLEDevice.h>
+#include <esp_random.h>
+#include <esp_system.h>
 
 #include <string>
 
@@ -84,19 +86,25 @@ float randomOffset(const float range) {
 // Logged here rather than per slice: the rotation re-airs each colour every few
 // hundred ms, and logging that would bury everything else.
 void buildSchedule() {
-  gScheduleCount = 0;
+  // The lock is only contended when a request is being served, and going silent
+  // because someone opened the web UI is a worse answer than airing the last
+  // cycle's readings again. Leave gSchedule and gScheduleCount alone and retry
+  // at the next boundary.
   if (!configLock()) {
+    Serial.println("BLE: config busy, reusing the previous cycle");
     return;
   }
-  if (gConfig.masterEnabled) {
+  const AppConfig config = gConfig;
+  configUnlock();
+
+  gScheduleCount = 0;
+  if (config.masterEnabled) {
     for (size_t i = 0; i < kTiltCount; ++i) {
-      if (gConfig.tilts[i].enabled) {
+      if (config.tilts[i].enabled) {
         gSchedule[gScheduleCount++] = i;
       }
     }
   }
-  const AppConfig config = gConfig;
-  configUnlock();
 
   for (size_t slot = 0; slot < gScheduleCount; ++slot) {
     const size_t colourIndex = gSchedule[slot];
@@ -171,13 +179,37 @@ void stopSlot() {
   gAdvertising->stop();
   gIsAdvertising = false;
 }
+// Why the device last restarted. This reboots for at least five different
+// reasons -- a portal save, /api/reboot, /api/reset-wifi, an OTA install, or a
+// panic -- and until now the log looked identical for all of them, which made
+// "did it crash or did someone press the button?" unanswerable after the fact.
+const char* resetReasonName(const esp_reset_reason_t reason) {
+  switch (reason) {
+    case ESP_RST_POWERON:  return "power-on";
+    case ESP_RST_SW:       return "software restart";
+    case ESP_RST_PANIC:    return "PANIC";
+    case ESP_RST_INT_WDT:  return "interrupt watchdog";
+    case ESP_RST_TASK_WDT: return "task watchdog";
+    case ESP_RST_WDT:      return "other watchdog";
+    case ESP_RST_BROWNOUT: return "BROWNOUT";
+    case ESP_RST_DEEPSLEEP: return "deep sleep wake";
+    case ESP_RST_EXT:      return "external reset";
+    case ESP_RST_SDIO:     return "SDIO";
+    default:               return "unknown";
+  }
+}
 }  // namespace
 
 void setup() {
   Serial.begin(115200);
-  randomSeed(static_cast<unsigned long>(micros()));
+  // Hardware-backed, unlike micros(): the boot path to this line is near enough
+  // constant that every board drew almost the same variance sequence.
+  randomSeed(esp_random());
 
   Serial.printf("\n%s %s (%s)\n", FW_NAME, FW_VERSION, FW_BUILD_DATE);
+
+  const esp_reset_reason_t resetReason = esp_reset_reason();
+  Serial.printf("Boot: reset reason %s\n", resetReasonName(resetReason));
 
   configBegin();
   configPrint();
@@ -202,15 +234,10 @@ void setup() {
     webServerBegin();
   }
 
-  // ESP.getEfuseMac() packs the factory MAC with byte 0 in the low bits, so this
-  // reads out in the same order the board prints on its label.
-  const uint64_t efuseMac = ESP.getEfuseMac();
-  uint8_t baseMac[kBleAddressLen];
-  for (size_t i = 0; i < kBleAddressLen; ++i) {
-    baseMac[i] = static_cast<uint8_t>((efuseMac >> (8 * i)) & 0xFF);
-  }
+  BleAddress baseMac;
+  efuseMacBytes(ESP.getEfuseMac(), baseMac);
   for (size_t i = 0; i < kTiltCount; ++i) {
-    if (!tiltBleAddress(baseMac, i, gAddresses[i])) {
+    if (!tiltBleAddress(baseMac.data(), i, gAddresses[i])) {
       Serial.printf("Could not derive an address for %s\n", kTiltColours[i].name);
     }
   }
@@ -236,6 +263,12 @@ void setup() {
   gCycleStartMs = millis() - kCyclePeriodMs;
 }
 
+// Deliberately never calls delay() or yield(), which looks like an oversight and
+// is not. Two reasons it is safe: the task watchdog does not watch the core 1
+// idle task (CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU1 is unset in the Arduino
+// sdkconfig, precisely because loop() is expected to spin), and the AsyncTCP
+// task runs at priority 10 against this task's 1, so it preempts regardless.
+// Adding a delay(1) here would only add jitter to the slice timing.
 void loop() {
   const unsigned long now = millis();
 

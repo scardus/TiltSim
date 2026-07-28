@@ -121,6 +121,12 @@ bool tiltBleAddress(const uint8_t* baseMac, const size_t colourIndex,
   return true;
 }
 
+void efuseMacBytes(const uint64_t efuseMac, BleAddress& out) {
+  for (size_t i = 0; i < kBleAddressLen; ++i) {
+    out[i] = static_cast<uint8_t>((efuseMac >> (8 * i)) & 0xFF);
+  }
+}
+
 static_assert(kTiltCount <= 8,
               "tiltBleAddress packs the colour index into the low 3 bits of the "
               "address; more than 8 colours would make two of them collide");

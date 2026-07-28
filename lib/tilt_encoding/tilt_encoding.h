@@ -116,3 +116,12 @@ using BleAddress = std::array<uint8_t, kBleAddressLen>;
 // baseMac must point to kBleAddressLen bytes. Returns false, leaving out
 // untouched, for a null pointer or a colourIndex past the last colour.
 bool tiltBleAddress(const uint8_t* baseMac, size_t colourIndex, BleAddress& out);
+
+// Unpacks the value ESP.getEfuseMac() returns into six bytes.
+//
+// That call packs the factory MAC with byte 0 in the low bits, so this reads out
+// in the same order the board prints on its label. Kept here next to
+// tiltBleAddress(), which consumes it, and so the hostname and the BLE addresses
+// cannot drift apart: they were previously unpacked by two open-coded loops that
+// looked nothing like each other.
+void efuseMacBytes(uint64_t efuseMac, BleAddress& out);

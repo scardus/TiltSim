@@ -48,8 +48,12 @@ void configMarkDirty();
 // Persists to NVS if dirty and the debounce has elapsed. Call from loop().
 void configFlushIfDue();
 
-// Restores built-in defaults and marks dirty.
-void configResetToDefaults();
+// Persists immediately if dirty, ignoring the debounce.
+//
+// For use on the way to a restart: the debounce is 1 s but a deferred reboot
+// fires after 600 ms, so without this an edit made just before Reboot or Forget
+// WiFi was discarded -- after the UI had already said "Saved".
+void configFlushNow();
 
 // Clamps one tilt's values into their valid ranges. The caller must hold the
 // lock; used by the web handlers after applying a patch.

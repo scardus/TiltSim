@@ -190,6 +190,19 @@ Patches are partial — send only the fields you are changing. Values are clampe
 server-side (temperature −40 to 250 °F, gravity 0.900 to 2.000), so the browser
 is never trusted.
 
+### No authentication, by design
+
+None of these endpoints is authenticated. Anyone who can reach the device on the
+network can change its readings, reboot it, erase its WiFi credentials, or
+install firmware over `/update`.
+
+This is a deliberate choice, not an oversight: the simulator is a bench and
+brewing-network tool, and it is assumed to live on a trusted isolated network
+alongside the receiver it exists to feed. **Do not expose it to an untrusted
+network or forward a port to it.** If that assumption ever stops holding,
+ESPAsyncWebServer ships `AsyncAuthenticationMiddleware` and the write endpoints
+above are the ones to put behind it.
+
 `tempF` and `tempVarianceF` are always Fahrenheit, whatever the web UI happens
 to be displaying — the °C option is a browser-side convenience and never
 reaches the device. There is no Celsius form of these fields.

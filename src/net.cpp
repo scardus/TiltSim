@@ -4,6 +4,8 @@
 #include <WiFi.h>
 #include <WiFiManager.h>
 
+#include "tilt_encoding.h"
+
 namespace {
 // Long enough to type a password on a phone, short enough that a headless
 // device left on a dead network gets back to advertising.
@@ -23,7 +25,11 @@ void startMdns() {
     Serial.println("mDNS: start failed");
     return;
   }
-  MDNS.addService("http", "tcp", 80);
+  if (!MDNS.addService("http", "tcp", 80)) {
+    // The name still resolves; only the service record is missing, so a browser
+    // pointed at the .local name works and only service discovery does not.
+    Serial.println("mDNS: http service advertisement failed");
+  }
   gMdnsStarted = true;
   Serial.printf("mDNS: http://%s.local\n", gHostname.c_str());
 }
@@ -31,15 +37,14 @@ void startMdns() {
 
 const String& netHostname() {
   if (gHostname.isEmpty()) {
-    // Canonical Arduino-ESP32 chip id: the last three bytes of the MAC, which
-    // is what the board prints on its own label.
-    const uint64_t mac = ESP.getEfuseMac();
-    uint32_t chipId = 0;
-    for (int i = 0; i < 17; i += 8) {
-      chipId |= ((mac >> (40 - i)) & 0xff) << i;
-    }
+    // The last three bytes of the MAC, which is what the board prints on its own
+    // label. Same unpacking the BLE addresses use, so the hostname and the
+    // addresses cannot disagree about which board this is.
+    BleAddress mac;
+    efuseMacBytes(ESP.getEfuseMac(), mac);
     char buffer[24];
-    snprintf(buffer, sizeof(buffer), "tiltsim-%06x", chipId);
+    snprintf(buffer, sizeof(buffer), "tiltsim-%02x%02x%02x", mac[3], mac[4],
+             mac[5]);
     gHostname = buffer;
   }
   return gHostname;
@@ -48,8 +53,13 @@ const String& netHostname() {
 bool netBegin() {
   const String& hostname = netHostname();
 
-  WiFi.mode(WIFI_STA);
-  WiFi.setHostname(hostname.c_str());
+  if (!WiFi.mode(WIFI_STA)) {
+    Serial.println("WiFi: could not enter station mode");
+  }
+  if (!WiFi.setHostname(hostname.c_str())) {
+    // Cosmetic: the DHCP lease shows up under the default name instead.
+    Serial.println("WiFi: hostname not accepted");
+  }
 
   WiFiManager wm;
   wm.setHostname(hostname.c_str());
@@ -101,7 +111,11 @@ void netLoop() {
   }
   gLastReconnectMs = now;
   Serial.println("WiFi: link down, reconnecting");
-  WiFi.reconnect();
+  if (!WiFi.reconnect()) {
+    // Retried on the next interval regardless; logged so a link that never
+    // comes back is distinguishable from one that reconnects and drops again.
+    Serial.println("WiFi: reconnect request refused");
+  }
 }
 
 bool netIsConnected() {
