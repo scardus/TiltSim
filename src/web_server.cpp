@@ -146,6 +146,14 @@ bool gOtaActive = false;
 bool gOtaStarted = false;
 const char* gOtaError = nullptr;
 
+// When the last upload chunk arrived, so a transfer that dies mid-flight can be
+// given up on. Only meaningful while gOtaActive.
+unsigned long gOtaLastChunkMs = 0;
+
+// Generous next to the gap between chunks on a healthy upload, which is
+// milliseconds; this only ever fires on a transfer that has actually stopped.
+constexpr unsigned long kOtaStallMs = 15000;
+
 // First byte of every ESP32 firmware image.
 constexpr uint8_t kEspImageMagic = 0xE9;
 
@@ -166,6 +174,8 @@ void requestDeferred(const PendingAction action) {
 void handleUploadChunk(AsyncWebServerRequest* request, const String& filename,
                        const size_t index, uint8_t* data, const size_t len,
                        const bool final) {
+  gOtaLastChunkMs = millis();
+
   if (index == 0) {
     Serial.printf("OTA: receiving %s\n", filename.c_str());
     gOtaStarted = true;
@@ -286,6 +296,19 @@ bool webOtaInProgress() {
 }
 
 void webServerLoop() {
+  // An upload whose connection dies mid-flight never delivers a final chunk and
+  // never reports a write error, so nothing else clears gOtaActive -- and while
+  // it is set, loop() stops the radio every pass. Left alone the device stays
+  // silent until someone power cycles it, which is a poor way to find out an
+  // update failed on a device that is not in the room.
+  if (gOtaActive && millis() - gOtaLastChunkMs > kOtaStallMs) {
+    Update.abort();
+    gOtaActive = false;
+    gOtaStarted = false;
+    gOtaError = "Upload stalled";
+    Serial.println("OTA: upload stalled, aborted -- advertising resumes");
+  }
+
   // gRoutesRegistered guards against binding a server with no handlers on it:
   // an offline boot never calls webServerBegin() at all.
   if (gRoutesRegistered && !gBound &&
