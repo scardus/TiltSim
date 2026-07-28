@@ -43,9 +43,10 @@ constexpr unsigned long kCyclePeriodMs = 5000;
 //
 // This is a deliberate departure from real Tilt behaviour, which bursts once per
 // 5 s from its own radio. One radio cannot advertise eight addresses at once
-// (concurrent advertising sets need BLE 5.0 extended advertising, which the
-// classic ESP32's Bluedroid stack does not provide), so the duty cycle is traded
-// for discoverability. The reading cadence stays honest at one value per 5 s.
+// (concurrent advertising sets need BLE 5.0 extended advertising, and the
+// classic ESP32 is 4.2 silicon -- no host stack can offer what the radio does
+// not have), so the duty cycle is traded for discoverability. The reading
+// cadence stays honest at one value per 5 s.
 constexpr unsigned long kSliceMs = 200;
 
 // BLE Core Spec advDelay: 0-10 ms of pseudo-random jitter per advertising event.
@@ -94,8 +95,9 @@ bool buildIBeaconPayload(const char* canonicalUuid, uint16_t major,
 // The controller emits both; the flags structure is not part of the iBeacon
 // payload itself, which is why it lives here rather than in the payload above.
 //
-// This exists so the bytes can be handed to esp_ble_gap_config_adv_data_raw()
-// directly. Going through BLEAdvertisementData instead cost seven heap
+// This exists so the bytes can be handed to ble_gap_adv_set_data() directly,
+// which passes them to the controller unaltered -- flags structure and all.
+// Going through an advertisement-builder class instead cost seven heap
 // allocations every 200 ms slice -- it takes std::string by value twice, builds
 // a concatenation, and its getPayload() returns by value and is called twice --
 // which is roughly 35 malloc/free pairs a second of small-block churn running

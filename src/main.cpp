@@ -34,8 +34,8 @@ size_t gScheduleCount = 0;
 // rotation visits each colour several times.
 //
 // Stored as the finished on-air bytes rather than the iBeacon payload, so a
-// slice is a single esp_ble_gap_config_adv_data_raw() call with nothing to
-// assemble and nothing to allocate.
+// slice is a single ble_gap_adv_set_data() call with nothing to assemble and
+// nothing to allocate.
 AdvData gAdvData[kTiltCount];
 
 // gAddresses is the printed order, which is what the per-cycle log shows;
@@ -167,8 +167,8 @@ bool startSlot(const size_t slotIndex) {
   // Straight to the controller: ble_gap_adv_set_data() is a thin wrapper on the
   // HCI Set Advertising Data command and sends exactly these bytes, flags
   // structure included. The bytes were assembled at the cycle boundary, so this
-  // whole slice allocates nothing -- where going through BLEAdvertisementData
-  // took seven heap allocations every 200 ms. See buildAdvData() for the detail.
+  // whole slice allocates nothing -- where the advertisement-builder class this
+  // replaced took seven heap allocations every 200 ms. See buildAdvData().
   int rc = ble_gap_adv_set_data(gAdvData[colourIndex].data(),
                                 static_cast<int>(gAdvData[colourIndex].size()));
   if (rc != 0) {

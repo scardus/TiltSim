@@ -29,10 +29,10 @@ void test_payload_matches_reference_byte_for_byte() {
 
 void test_adv_data_matches_the_canonical_iBeacon_advertisement() {
   // The whole advertisement, flags structure included, byte for byte. This is
-  // the guard on building the AD data by hand and handing it to
-  // esp_ble_gap_config_adv_data_raw() instead of letting BLEAdvertisementData
-  // assemble it: the bytes that leave the antenna must not have changed, or the
-  // receiver built against this reference stops recognising the beacon.
+  // the guard on building the AD data by hand and handing it to the stack raw
+  // instead of letting an advertisement-builder class assemble it: the bytes
+  // that leave the antenna must not have changed, or the receiver built against
+  // this reference stops recognising the beacon.
   //
   // README documents this exact sequence: 02 01 1A 1A FF 4C 00 02 15 ...
   const uint8_t expected[kAdvDataLen] = {
