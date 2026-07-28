@@ -6,6 +6,8 @@
 #include <esp_ota_ops.h>
 #include <lwip/sockets.h>
 
+#include <atomic>
+
 #include "heap.h"
 #include "net.h"
 #include "tilt_config.h"
@@ -31,6 +33,13 @@ constexpr size_t kPatchBufferBytes = 512;
 // Below this, building the reply is what pushes the heap over the edge.
 constexpr size_t kStateHeadroomBytes = 4096;
 constexpr size_t kPatchHeadroomBytes = 1536;
+
+// Cap on an incoming JSON body. AsyncCallbackJsonWebHandler defaults to 16384
+// and calloc()s the declared Content-Length in one contiguous block from
+// handleBody(), before any handler here is called -- so the heap guard below
+// never gets a say. The largest real body is a single-field patch, well under
+// 100 bytes.
+constexpr size_t kMaxJsonBodyBytes = 256;
 
 // Refusing a request costs a browser one retry. Attempting one without the room
 // to finish it costs a reboot: operator new throws std::bad_alloc, nothing in
@@ -129,16 +138,24 @@ void handleState(AsyncWebServerRequest* request) {
   doc["heapFree"] = ESP.getFreeHeap();
   doc["heapLargestBlock"] = largestUsableBlock();
 
+  // Snapshot under the lock, build the JSON outside it. Each insert below can
+  // allocate, and doing ~70 of them against a fragmented heap while holding the
+  // lock blocked loop()'s buildSchedule() and every other handler for the
+  // duration. buildSchedule() already works this way (main.cpp); 168 bytes of
+  // stack is a cheap trade for not serialising the device on the allocator.
+  AppConfig config;
   if (!configLock()) {
     sendBusy(request);
     return;
   }
-  doc["masterEnabled"] = gConfig.masterEnabled;
+  config = gConfig;
+  configUnlock();
+
+  doc["masterEnabled"] = config.masterEnabled;
   const JsonArray tilts = doc["tilts"].to<JsonArray>();
   for (size_t i = 0; i < kTiltCount; ++i) {
-    addTiltJson(tilts.add<JsonObject>(), i, gConfig.tilts[i]);
+    addTiltJson(tilts.add<JsonObject>(), i, config.tilts[i]);
   }
-  configUnlock();
 
   // Streamed rather than serialised into a String and handed to send(), which
   // would put this document in memory three times over: the JsonDocument, the
@@ -161,18 +178,22 @@ void handleMaster(AsyncWebServerRequest* request, const JsonVariant& body) {
     return;
   }
   gConfig.masterEnabled = body["enabled"].as<bool>();
-  configUnlock();
   configMarkDirty();
+  configUnlock();
   request->send(200, "application/json", "{\"ok\":true}");
 }
 
 // Applies a partial patch: only the fields present are touched, so the UI can
 // send a single changed field rather than the whole tilt.
-void handleTiltPatch(AsyncWebServerRequest* request, const JsonVariant& body) {
-  const String path = request->url();
-  const int slash = path.lastIndexOf('/');
-  const long index = path.substring(slash + 1).toInt();
-  if (index < 0 || static_cast<size_t>(index) >= kTiltCount) {
+//
+// The index is passed in rather than parsed back out of the URL. Parsing it cost
+// two String allocations per request (url() returns a reference, so assigning it
+// to a String copied, and substring() allocated again) and got the wrong answer
+// for a path like /api/tilt/0/x: the default URI matcher is prefix-with-slash,
+// not exact, so that reaches this handler and "x".toInt() silently yields 0.
+void handleTiltPatch(AsyncWebServerRequest* request, const size_t index,
+                     const JsonVariant& body) {
+  if (index >= kTiltCount) {
     request->send(404, "text/plain", "No such tilt");
     return;
   }
@@ -206,10 +227,15 @@ void handleTiltPatch(AsyncWebServerRequest* request, const JsonVariant& body) {
   // Never trust the browser: clamp whatever arrived back into range.
   configClampTilt(tilt);
 
-  JsonDocument doc;
-  addTiltJson(doc.to<JsonObject>(), index, tilt);
-  configUnlock();
+  // Copy out, then mark dirty and release. Marking inside the lock is what lets
+  // configFlushNow() clear the flag while it holds the lock and still be certain
+  // no edit fell between the snapshot and the clear.
+  const TiltSettings updated = tilt;
   configMarkDirty();
+  configUnlock();
+
+  JsonDocument doc;
+  addTiltJson(doc.to<JsonObject>(), index, updated);
 
   AsyncResponseStream* response =
       request->beginResponseStream("application/json", kPatchBufferBytes);
@@ -217,16 +243,40 @@ void handleTiltPatch(AsyncWebServerRequest* request, const JsonVariant& body) {
   finishResponse(request, response);
 }
 
-bool gOtaActive = false;
+// Written on the AsyncTCP task, read (and gOtaActive cleared) on the loop task.
+// Atomic rather than plain: the accesses happen to be single-word and would
+// work anyway, but nothing else here states that they cross a task boundary,
+// and this is the state whose races are actually load-bearing.
+std::atomic<bool> gOtaActive{false};
 // Tracked separately from Update.hasError(): a file rejected before
 // Update.begin() leaves the updater untouched, and reporting that as success
 // would tell the user their firmware installed when nothing was written.
-bool gOtaStarted = false;
-const char* gOtaError = nullptr;
+std::atomic<bool> gOtaStarted{false};
+std::atomic<const char*> gOtaError{nullptr};
 
 // When the last upload chunk arrived, so a transfer that dies mid-flight can be
 // given up on. Only meaningful while gOtaActive.
-unsigned long gOtaLastChunkMs = 0;
+std::atomic<unsigned long> gOtaLastChunkMs{0};
+
+// Serialises access to the global Update object across the two tasks that touch
+// it: chunks arrive on the AsyncTCP task, while the stall timeout below runs on
+// the loop task. Update is a single global with no locking of its own, so
+// aborting from one task while the other is inside write() corrupts its state.
+// Held only for the duration of a single Update call, so neither task waits long
+// enough to matter -- and in the stall case the AsyncTCP task is not running at
+// all, which is the whole point.
+SemaphoreHandle_t gUpdateMutex = nullptr;
+
+bool updateLock() {
+  return gUpdateMutex != nullptr &&
+         xSemaphoreTake(gUpdateMutex, pdMS_TO_TICKS(1000)) == pdTRUE;
+}
+
+void updateUnlock() {
+  if (gUpdateMutex != nullptr) {
+    xSemaphoreGive(gUpdateMutex);
+  }
+}
 
 // Generous next to the gap between chunks on a healthy upload, which is
 // milliseconds; this only ever fires on a transfer that has actually stopped.
@@ -239,8 +289,9 @@ constexpr uint8_t kEspImageMagic = 0xE9;
 constexpr unsigned long kRebootGraceMs = 600;
 
 enum class PendingAction { None, Restart, ForgetWifi };
-PendingAction gPending = PendingAction::None;
-unsigned long gPendingAtMs = 0;
+// Requested by a handler on the AsyncTCP task, carried out by loop().
+std::atomic<PendingAction> gPending{PendingAction::None};
+std::atomic<unsigned long> gPendingAtMs{0};
 
 void requestDeferred(const PendingAction action) {
   gPending = action;
@@ -266,8 +317,16 @@ void handleUploadChunk(AsyncWebServerRequest* request, const String& filename,
       Serial.println("OTA: rejected, not an ESP32 firmware image");
       return;
     }
-    if (!Update.begin(UPDATE_SIZE_UNKNOWN)) {
+    if (!updateLock()) {
+      gOtaError = "Updater busy";
+      return;
+    }
+    const bool began = Update.begin(UPDATE_SIZE_UNKNOWN);
+    if (!began) {
       Update.printError(Serial);
+    }
+    updateUnlock();
+    if (!began) {
       gOtaError = "Not enough room for the update";
       return;
     }
@@ -278,8 +337,20 @@ void handleUploadChunk(AsyncWebServerRequest* request, const String& filename,
     return;
   }
 
+  if (!updateLock()) {
+    return;  // The stall timeout has it; it is tearing this transfer down.
+  }
+  // Re-check under the lock: the loop task may have aborted the transfer while
+  // this chunk was waiting, in which case Update no longer has a session open
+  // and writing to it would restart one behind everyone's back.
+  if (!gOtaActive) {
+    updateUnlock();
+    return;
+  }
+
   if (Update.write(data, len) != len) {
     Update.printError(Serial);
+    updateUnlock();
     gOtaError = "Write failed";
     gOtaActive = false;
     return;
@@ -294,6 +365,7 @@ void handleUploadChunk(AsyncWebServerRequest* request, const String& filename,
     }
     gOtaActive = false;
   }
+  updateUnlock();
 }
 
 void handleUploadDone(AsyncWebServerRequest* request) {
@@ -303,10 +375,11 @@ void handleUploadDone(AsyncWebServerRequest* request) {
   }
   gOtaStarted = false;
 
-  const bool ok = gOtaError == nullptr && !Update.hasError();
+  const char* error = gOtaError.load();
+  const bool ok = error == nullptr && !Update.hasError();
   AsyncWebServerResponse* response = request->beginResponse(
       ok ? 200 : 400, "text/plain",
-      ok ? "Update complete" : (gOtaError != nullptr ? gOtaError : "Update failed"));
+      ok ? "Update complete" : (error != nullptr ? error : "Update failed"));
   // The socket dies with the reboot, so ask the browser not to reuse it.
   response->addHeader("Connection", "close");
   request->send(response);
@@ -406,11 +479,18 @@ void webServerLoop() {
   // silent until someone power cycles it, which is a poor way to find out an
   // update failed on a device that is not in the room.
   if (gOtaActive && millis() - gOtaLastChunkMs > kOtaStallMs) {
-    Update.abort();
-    gOtaActive = false;
-    gOtaStarted = false;
-    gOtaError = "Upload stalled";
-    Serial.println("OTA: upload stalled, aborted -- advertising resumes");
+    // Under the lock, so this cannot land in the middle of an Update.write() on
+    // the AsyncTCP task. On a genuinely stalled transfer that task is idle and
+    // the take is uncontended; if a late chunk is being written right now, this
+    // waits for it and that chunk's own re-check then sees gOtaActive false.
+    if (updateLock()) {
+      Update.abort();
+      gOtaActive = false;
+      gOtaStarted = false;
+      gOtaError = "Upload stalled";
+      updateUnlock();
+      Serial.println("OTA: upload stalled, aborted -- advertising resumes");
+    }
   }
 
   // gRoutesRegistered guards against binding a server with no handlers on it:
@@ -430,6 +510,11 @@ void webServerLoop() {
   const PendingAction action = gPending;
   gPending = PendingAction::None;
 
+  // The reboot grace is 600 ms but the config debounce is 1 s, so an edit made
+  // just before Reboot or Forget WiFi was pressed has not been written yet.
+  // Without this it is discarded -- after the UI has already said "Saved".
+  configFlushNow();
+
   if (action == PendingAction::ForgetWifi) {
     netForgetCredentials();
     return;
@@ -438,6 +523,8 @@ void webServerLoop() {
 }
 
 bool webServerBegin() {
+  gUpdateMutex = xSemaphoreCreateMutex();
+
   gServer.on("/", HTTP_GET, [](AsyncWebServerRequest* request) {
     sendProgmem(request, "text/html", kIndexHtml);
   });
@@ -455,21 +542,30 @@ bool webServerBegin() {
 
   gServer.on("/api/state", HTTP_GET, handleState);
 
-  gServer.addHandler(new AsyncCallbackJsonWebHandler(
+  auto* master = new AsyncCallbackJsonWebHandler(
       "/api/master", [](AsyncWebServerRequest* request, JsonVariant& body) {
         handleMaster(request, body);
-      }));
+      });
+  // The default is 16 KB, and the library calloc()s exactly that much in one
+  // contiguous block before any handler here runs -- so haveHeadroom() cannot
+  // see it, let alone refuse it. The real bodies are a few dozen bytes.
+  master->setMaxContentLength(kMaxJsonBodyBytes);
+  gServer.addHandler(master);
 
-  // One handler for every /api/tilt/<n>; the index is parsed back out of the
-  // path. The handler keeps a pointer to the URI, so the storage must outlive
-  // this function.
-  static char paths[kTiltCount][16];
+  // One handler per /api/tilt/<n>, each capturing its own index. Capturing is
+  // what removes the URL parsing: AsyncCallbackJsonWebHandler takes a
+  // std::function, so the lambda does not have to be capture-free.
   for (size_t i = 0; i < kTiltCount; ++i) {
+    // The handler keeps a pointer to the URI string, so the storage has to
+    // outlive this function.
+    static char paths[kTiltCount][16];
     snprintf(paths[i], sizeof(paths[i]), "/api/tilt/%u", static_cast<unsigned>(i));
-    gServer.addHandler(new AsyncCallbackJsonWebHandler(
-        paths[i], [](AsyncWebServerRequest* request, JsonVariant& body) {
-          handleTiltPatch(request, body);
-        }));
+    auto* handler = new AsyncCallbackJsonWebHandler(
+        paths[i], [i](AsyncWebServerRequest* request, JsonVariant& body) {
+          handleTiltPatch(request, i, body);
+        });
+    handler->setMaxContentLength(kMaxJsonBodyBytes);
+    gServer.addHandler(handler);
   }
 
   gServer.on("/api/reset-wifi", HTTP_POST, [](AsyncWebServerRequest* request) {

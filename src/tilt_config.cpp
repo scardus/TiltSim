@@ -2,6 +2,9 @@
 
 #include <Arduino.h>
 #include <Preferences.h>
+#include <esp_rom_crc.h>
+
+#include <cstring>
 
 AppConfig gConfig;
 
@@ -19,6 +22,17 @@ constexpr unsigned long kSaveDebounceMs = 1000;
 SemaphoreHandle_t gConfigMutex = nullptr;
 bool gDirty = false;
 unsigned long gDirtyAtMs = 0;
+
+// CRC of the blob last written, so an edit that changes nothing does not cost a
+// flash write. A CRC rather than a second AppConfig because this lives in .bss
+// for the life of the device and 4 bytes is not 168.
+uint32_t gSavedCrc = 0;
+bool gHaveSavedCrc = false;
+
+uint32_t configCrc(const AppConfig& config) {
+  return esp_rom_crc32_le(0, reinterpret_cast<const uint8_t*>(&config),
+                          sizeof(config));
+}
 
 float clampFloat(const float value, const float low, const float high) {
   if (!isfinite(value)) {
@@ -56,20 +70,35 @@ void applyDefaults() {
   }
 }
 
-void saveNow() {
+// Writes a snapshot rather than reading gConfig, so the caller can release the
+// config lock first: an NVS commit is tens of ms and the lock has a 100 ms
+// timeout, so holding it across the write turned a slider drag during a flush
+// into a 503 for the browser.
+//
+// Returns false only when the write was attempted and failed. A no-op skip
+// counts as success -- there is nothing left to retry.
+bool saveNow(const AppConfig& config) {
+  const uint32_t crc = configCrc(config);
+  if (gHaveSavedCrc && crc == gSavedCrc) {
+    return true;  // Byte-identical to what is already stored.
+  }
+
   Preferences prefs;
   if (!prefs.begin(kPrefsNamespace, false)) {
     Serial.println("Config: NVS open failed, not saved");
-    return;
+    return false;
   }
-  const size_t written = prefs.putBytes(kPrefsKey, &gConfig, sizeof(gConfig));
+  const size_t written = prefs.putBytes(kPrefsKey, &config, sizeof(config));
   prefs.end();
 
-  if (written != sizeof(gConfig)) {
+  if (written != sizeof(config)) {
     Serial.println("Config: short write, not saved");
-    return;
+    return false;
   }
+  gSavedCrc = crc;
+  gHaveSavedCrc = true;
   Serial.println("Config: saved");
+  return true;
 }
 }  // namespace
 
@@ -108,6 +137,11 @@ void configBegin() {
     return;
   }
 
+  // Record what NVS actually holds, so a session that changes nothing -- or
+  // changes a value and puts it back -- costs no flash write at all.
+  gSavedCrc = configCrc(stored);
+  gHaveSavedCrc = true;
+
   gConfig = stored;
   for (size_t i = 0; i < kTiltCount; ++i) {
     configClampTilt(gConfig.tilts[i]);
@@ -131,17 +165,28 @@ void configFlushIfDue() {
   if (!gDirty || (millis() - gDirtyAtMs < kSaveDebounceMs)) {
     return;
   }
-  if (!configLock()) {
-    return;
-  }
-  saveNow();
-  gDirty = false;
-  configUnlock();
+  configFlushNow();
 }
 
-void configResetToDefaults() {
-  applyDefaults();
-  configMarkDirty();
+void configFlushNow() {
+  if (!gDirty) {
+    return;
+  }
+  if (!configLock()) {
+    return;  // Next pass; still dirty, so nothing is lost.
+  }
+  // Snapshot and clear inside the lock, write outside it. Clearing here is what
+  // makes a concurrent edit safe: a handler marks dirty again while still
+  // holding the lock, so its change is either already in this snapshot or will
+  // be caught by the next flush. It can never fall between the two.
+  const AppConfig snapshot = gConfig;
+  gDirty = false;
+  configUnlock();
+
+  if (!saveNow(snapshot)) {
+    gDirty = true;
+    gDirtyAtMs = millis();
+  }
 }
 
 void configPrint() {
