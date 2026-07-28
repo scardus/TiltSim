@@ -25,10 +25,16 @@ constexpr unsigned long kFirstPostDelayMs = 30000;
 // A black-hole endpoint must not wedge the task until the next interval.
 constexpr uint16_t kHttpTimeoutMs = 10000;
 
-// A TLS handshake is the deepest thing this task does, and this number is a
-// guess sized for one rather than a measurement. ispindelStackFree() reports
-// what is actually left so it can be replaced with a measured value; until an
-// https round has been observed, err high.
+// A TLS handshake is the deepest thing this task does. Measured with
+// uxTaskGetStackHighWaterMark(), reported by /api/state as ispindelStackFree so
+// it can be re-checked rather than taken on trust: a plain HTTP round peaked at
+// 3448 bytes and an https one at 5000, against webhook.site.
+//
+// 16384 leaves 11384 spare, about 3.3x the worst case seen -- in line with the
+// 2.9x CONFIG_ASYNC_TCP_STACK_SIZE carries. Kept at 3.3x rather than trimmed
+// because TLS stack depth varies with the peer's certificate chain and cipher,
+// and one endpoint is one data point. There is room for it: the heap has ~94 KB
+// in one piece with this task running.
 constexpr uint32_t kTaskStackBytes = 16384;
 
 // Below the Arduino loop task (priority 1), so the BLE rotation always wins.
