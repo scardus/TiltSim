@@ -26,6 +26,40 @@ AsyncWebServer gServer(kHttpPort);
 constexpr size_t kStateBufferBytes = 2048;
 constexpr size_t kPatchBufferBytes = 512;
 
+// Enough for the response stream's buffer plus the response object, its header
+// String and whatever the JSON document still holds when the buffer is taken.
+// Below this, building the reply is what pushes the heap over the edge.
+constexpr size_t kStateHeadroomBytes = 4096;
+constexpr size_t kPatchHeadroomBytes = 1536;
+
+// Refusing a request costs a browser one retry. Attempting one without the room
+// to finish it costs a reboot: operator new throws std::bad_alloc, nothing in
+// the handler chain catches it, and std::terminate calls abort(). So this trades
+// a visible, recoverable failure for an invisible, fatal one.
+//
+// This is load-bearing, not insurance. An idle device has ~34 KB in one piece,
+// but five concurrent connections -- one browser page load -- fragment the heap
+// so badly that the largest usable block falls to around 1.4 KB while 54 KB is
+// still free in total. Measured: 4 refusals in 50 requests over ten rounds of
+// five-way parallel load. Every one of those would otherwise have been a
+// reboot.
+//
+// The real fix is fewer connections per page load, not a bigger heap.
+bool haveHeadroom(AsyncWebServerRequest* request, const size_t needed) {
+  const size_t largest = largestUsableBlock();
+  if (largest >= needed) {
+    return true;
+  }
+  Serial.printf("[HTTP] refused %s: largest usable block %u < %u\n",
+                request->url().c_str(), static_cast<unsigned>(largest),
+                static_cast<unsigned>(needed));
+  AsyncWebServerResponse* response =
+      request->beginResponse(503, "text/plain", "Busy, retry");
+  response->addHeader("Retry-After", "1");
+  request->send(response);
+  return false;
+}
+
 // Belt and braces. AsyncAbstractResponse::_respond() adds this itself in
 // ESPAsyncWebServer 3.11 (WebResponses.cpp:340), which it did not always do --
 // the streaming responses used below inherit from it, and when they carried no
@@ -69,6 +103,9 @@ void sendBusy(AsyncWebServerRequest* request) {
 }
 
 void handleState(AsyncWebServerRequest* request) {
+  if (!haveHeadroom(request, kStateHeadroomBytes)) {
+    return;
+  }
   JsonDocument doc;
   doc["name"] = FW_NAME;
   doc["version"] = FW_VERSION;
@@ -137,6 +174,9 @@ void handleTiltPatch(AsyncWebServerRequest* request, const JsonVariant& body) {
   const long index = path.substring(slash + 1).toInt();
   if (index < 0 || static_cast<size_t>(index) >= kTiltCount) {
     request->send(404, "text/plain", "No such tilt");
+    return;
+  }
+  if (!haveHeadroom(request, kPatchHeadroomBytes)) {
     return;
   }
 
@@ -293,6 +333,12 @@ void handleUploadDone(AsyncWebServerRequest* request) {
 // The filler copies ~1.4 KB at a time into the buffer the stack already owns,
 // so the cost no longer scales with the size of the asset.
 void sendProgmem(AsyncWebServerRequest* request, const char* type, const char* body) {
+  // Cheap next to the JSON handlers -- the body never lands on the heap -- but
+  // the response object and its header String still have to be allocated, and
+  // an asset request is usually one of several arriving at once.
+  if (!haveHeadroom(request, kPatchHeadroomBytes)) {
+    return;
+  }
   const size_t len = strlen(body);
   AsyncWebServerResponse* response = request->beginResponse(
       type, len, [body, len](uint8_t* buffer, size_t maxLen, size_t index) -> size_t {
