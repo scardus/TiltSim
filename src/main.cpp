@@ -143,6 +143,20 @@ void setup() {
   configBegin();
   configPrint();
 
+  // Warm the sketch MD5 while the heap is quiet and nothing is being served.
+  //
+  // /api/state reports it, and the first call is the single largest allocation
+  // anywhere in the web path: getSketchMD5() takes a 4 KB contiguous buffer to
+  // read the whole image through (Esp.cpp:222). Asking for that on a heap
+  // squeezed by several concurrent connections is a poor bet -- operator new
+  // throws, nothing in the handler chain catches it, and std::terminate calls
+  // abort(). The result is cached in a function-static String, so paying for it
+  // here means every later call is free.
+  const unsigned long md5Start = millis();
+  const String sketchMd5 = ESP.getSketchMD5();
+  Serial.printf("Boot: sketch md5 %s (%lu ms)\n", sketchMd5.c_str(),
+                millis() - md5Start);
+
   // Before BLE: the captive portal blocks, and there is no point holding the
   // BLE stack's memory while it does.
   if (netBegin()) {
