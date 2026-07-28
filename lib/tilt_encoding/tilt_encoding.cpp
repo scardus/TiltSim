@@ -88,6 +88,20 @@ bool buildIBeaconPayload(const char* canonicalUuid, const uint16_t major,
   return i == kIBeaconPayloadLen;
 }
 
+void buildAdvData(const IBeaconPayload& payload, AdvData& out) {
+  size_t i = 0;
+  // Flags: length covers the type byte plus the one value byte.
+  out[i++] = 0x02;
+  out[i++] = 0x01;  // AD type: flags
+  out[i++] = kAdvFlags;
+  // Manufacturer specific: length covers the type byte plus the whole payload.
+  out[i++] = static_cast<uint8_t>(kIBeaconPayloadLen + 1);
+  out[i++] = 0xFF;  // AD type: manufacturer specific
+  for (size_t b = 0; b < kIBeaconPayloadLen; ++b) {
+    out[i++] = payload[b];
+  }
+}
+
 uint16_t encodeTemperature(const float tempF, const float offsetF, const bool pro) {
   const float adjusted = tempF + offsetF;
   return clampToUint16(pro ? adjusted * 10.0f : adjusted);

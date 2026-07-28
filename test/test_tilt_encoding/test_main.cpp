@@ -27,6 +27,61 @@ void test_payload_matches_reference_byte_for_byte() {
   TEST_ASSERT_EQUAL_UINT8_ARRAY(expected, actual.data(), kIBeaconPayloadLen);
 }
 
+void test_adv_data_matches_the_canonical_iBeacon_advertisement() {
+  // The whole advertisement, flags structure included, byte for byte. This is
+  // the guard on building the AD data by hand and handing it to
+  // esp_ble_gap_config_adv_data_raw() instead of letting BLEAdvertisementData
+  // assemble it: the bytes that leave the antenna must not have changed, or the
+  // receiver built against this reference stops recognising the beacon.
+  //
+  // README documents this exact sequence: 02 01 1A 1A FF 4C 00 02 15 ...
+  const uint8_t expected[kAdvDataLen] = {
+    0x02, 0x01, 0x1A,        // flags: len 2, type 0x01, LE General + BR/EDR bits
+    0x1A, 0xFF,              // manufacturer specific: len 26, type 0xFF
+    0x4C, 0x00,              // Apple company ID, little-endian in AD data
+    0x02, 0x15,              // iBeacon subtype, remaining length
+    0xA4, 0x95, 0xBB, 0x10,  // UUID bytes 0-3, byte 3 = Red
+    0xC5, 0xB1, 0x4B, 0x44, 0xB5, 0x12, 0x13, 0x70, 0xF0, 0x2D, 0x74, 0xDE,
+    0x00, 0x44,              // major 68 degF, big endian
+    0x04, 0x1D,              // minor 1053 = 1.053 SG, big endian
+    0xF6,                    // measured power -10
+  };
+
+  IBeaconPayload payload;
+  TEST_ASSERT_TRUE(buildIBeaconPayload("a495bb10-c5b1-4b44-b512-1370f02d74de",
+                                       68, 1053, -10, payload));
+  AdvData adv;
+  buildAdvData(payload, adv);
+  TEST_ASSERT_EQUAL_UINT8_ARRAY(expected, adv.data(), kAdvDataLen);
+
+  // 30 bytes, inside the 31 the legacy advertising PDU allows. One more field
+  // would not fit, and the controller would silently truncate rather than fail.
+  TEST_ASSERT_EQUAL_UINT32(30, kAdvDataLen);
+}
+
+void test_adv_data_length_bytes_describe_their_own_structures() {
+  // A length byte that does not match its structure makes a scanner stop
+  // parsing at that point, which drops the beacon without any error anywhere.
+  IBeaconPayload payload;
+  TEST_ASSERT_TRUE(buildIBeaconPayload(kTiltColours[3].uuid, 700, 10500, -59,
+                                       payload));
+  AdvData adv;
+  buildAdvData(payload, adv);
+
+  // Each AD structure is <length> <type> <length-1 bytes of value>, and walking
+  // them must land exactly on the end of the buffer.
+  size_t offset = 0;
+  size_t structures = 0;
+  while (offset < kAdvDataLen) {
+    const size_t len = adv[offset];
+    TEST_ASSERT_TRUE(len > 0);
+    offset += 1 + len;
+    ++structures;
+  }
+  TEST_ASSERT_EQUAL_UINT32(kAdvDataLen, offset);
+  TEST_ASSERT_EQUAL_UINT32(2, structures);
+}
+
 void test_company_id_is_apple_in_air_order() {
   // The regression this guards: the payload used to air 00 4C, advertising
   // company ID 0x4C00, which is not Apple. Receivers that filter on the Apple
@@ -204,6 +259,8 @@ void setup() {
   delay(2000);
   UNITY_BEGIN();
   RUN_TEST(test_payload_matches_reference_byte_for_byte);
+  RUN_TEST(test_adv_data_matches_the_canonical_iBeacon_advertisement);
+  RUN_TEST(test_adv_data_length_bytes_describe_their_own_structures);
   RUN_TEST(test_company_id_is_apple_in_air_order);
   RUN_TEST(test_major_and_minor_are_big_endian);
   RUN_TEST(test_every_colour_airs_its_uuid_canonically);

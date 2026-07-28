@@ -86,6 +86,27 @@ constexpr uint8_t kAdvFlags = 0x1A;
 bool buildIBeaconPayload(const char* canonicalUuid, uint16_t major,
                          uint16_t minor, int8_t txPower, IBeaconPayload& out);
 
+// The complete advertising data, exactly as it goes on air:
+//
+//   02 01 1A     the flags AD structure (length, type 0x01, kAdvFlags)
+//   1A FF ..     the manufacturer-specific one (length, type 0xFF, payload)
+//
+// The controller emits both; the flags structure is not part of the iBeacon
+// payload itself, which is why it lives here rather than in the payload above.
+//
+// This exists so the bytes can be handed to esp_ble_gap_config_adv_data_raw()
+// directly. Going through BLEAdvertisementData instead cost seven heap
+// allocations every 200 ms slice -- it takes std::string by value twice, builds
+// a concatenation, and its getPayload() returns by value and is called twice --
+// which is roughly 35 malloc/free pairs a second of small-block churn running
+// underneath the web server's much larger allocations.
+constexpr size_t kAdvDataLen = 5 + kIBeaconPayloadLen;
+static_assert(kAdvDataLen <= 31,
+              "legacy advertising carries at most 31 bytes of AD data");
+using AdvData = std::array<uint8_t, kAdvDataLen>;
+
+void buildAdvData(const IBeaconPayload& payload, AdvData& out);
+
 // Pro Tilts report one more decimal place by advertising 10x the standard
 // value: 68.5 degF -> major 685, 1.0530 SG -> minor 10530.
 //
