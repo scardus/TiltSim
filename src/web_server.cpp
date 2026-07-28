@@ -12,6 +12,7 @@
 
 #include "heap.h"
 #include "net.h"
+#include "ota_rollback.h"
 #include "tilt_config.h"
 #include "tilt_encoding.h"
 #include "version.h"
@@ -131,6 +132,12 @@ void handleState(AsyncWebServerRequest* request) {
   const esp_partition_t* running = esp_ota_get_running_partition();
   doc["partition"] = running != nullptr ? running->label : "?";
   doc["sketchMd5"] = ESP.getSketchMD5();
+
+  // Whether that slot is still on probation. A freshly installed image reads
+  // "pending verify" until it confirms itself and "valid" afterwards, so an
+  // update is only safely landed once this says valid -- before that, any
+  // restart puts the previous firmware back.
+  doc["otaState"] = otaRollbackState();
 
   // Free heap and the largest single block it can still hand out. The second
   // number is the one that matters: fragmentation is what stops a large
@@ -533,6 +540,10 @@ bool tryBind() {
 
 bool webOtaInProgress() {
   return gOtaActive;
+}
+
+bool webServerIsBound() {
+  return gBound;
 }
 
 void webServerLoop() {
