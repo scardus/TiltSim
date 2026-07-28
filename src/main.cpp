@@ -4,6 +4,7 @@
 #include <esp_system.h>
 
 #include "heap.h"
+#include "ispindel.h"
 #include "net.h"
 #include "ota_rollback.h"
 #include "tilt_config.h"
@@ -265,6 +266,11 @@ void setup() {
   if (netBegin()) {
     webServerBegin();
   }
+
+  // After the network, because posting without one is pointless, and before
+  // NimBLEDevice::init() below, because that is the roomiest the heap ever is
+  // and this is where the posting task's stack has to come from.
+  ispindelBegin();
 
   BleAddress baseMac;
   efuseMacBytes(ESP.getEfuseMac(), baseMac);
