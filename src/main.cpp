@@ -1,6 +1,7 @@
 #include <Arduino.h>
 #include <BLEAdvertising.h>
 #include <BLEDevice.h>
+#include <esp_gap_ble_api.h>
 #include <esp_random.h>
 #include <esp_system.h>
 
@@ -28,11 +29,15 @@ bool gIsAdvertising = false;
 size_t gSchedule[kTiltCount];
 size_t gScheduleCount = 0;
 
-// Both indexed by colour, not by slot. Payloads are built once per cycle so a
-// colour advertises identical readings every time it airs within that cycle,
-// keeping the value cadence at one reading per 5 s even though the rotation
-// visits each colour several times.
-IBeaconPayload gPayloads[kTiltCount];
+// Both indexed by colour, not by slot. The advertisement is built once per cycle
+// so a colour advertises identical readings every time it airs within that
+// cycle, keeping the value cadence at one reading per 5 s even though the
+// rotation visits each colour several times.
+//
+// Stored as the finished on-air bytes rather than the iBeacon payload, so a
+// slice is a single esp_ble_gap_config_adv_data_raw() call with nothing to
+// assemble and nothing to allocate.
+AdvData gAdvData[kTiltCount];
 BleAddress gAddresses[kTiltCount];
 
 // Often enough to watch a leak develop, rare enough not to bury the per-cycle
@@ -115,12 +120,14 @@ void buildSchedule() {
     const uint16_t minor =
         encodeGravity(tilt.gravity, randomOffset(tilt.gravityVariance), tilt.pro);
 
+    IBeaconPayload payload;
     if (!buildIBeaconPayload(kTiltColours[colourIndex].uuid, major, minor,
-                             kMeasuredPower, gPayloads[colourIndex])) {
+                             kMeasuredPower, payload)) {
       Serial.print("Invalid UUID for ");
       Serial.println(kTiltColours[colourIndex].name);
       continue;
     }
+    buildAdvData(payload, gAdvData[colourIndex]);
 
     const BleAddress& mac = gAddresses[colourIndex];
     Serial.printf("%-6s %s major=%-5u minor=%-6u mac=%02X:%02X:%02X:%02X:%02X:%02X\n",
@@ -146,14 +153,19 @@ bool startSlot(const size_t slotIndex) {
   gAdvertising->setDeviceAddress(gAddresses[colourIndex].data(),
                                  BLE_ADDR_TYPE_RANDOM);
 
-  BLEAdvertisementData advData;
-  advData.setFlags(kAdvFlags);
-  // The length-taking constructor is required: the payload contains 0x00 bytes.
-  advData.setManufacturerData(
-      std::string(reinterpret_cast<const char*>(gPayloads[colourIndex].data()),
-                  gPayloads[colourIndex].size()));
+  // Straight to the controller. The bytes were assembled at the cycle boundary,
+  // so this whole slice allocates nothing -- where going through
+  // BLEAdvertisementData took seven heap allocations every 200 ms. See
+  // buildAdvData() for the detail, and setup() for why start() below does not
+  // overwrite what this just configured.
+  const esp_err_t rc = esp_ble_gap_config_adv_data_raw(
+      gAdvData[colourIndex].data(), gAdvData[colourIndex].size());
+  if (rc != ESP_OK) {
+    Serial.printf("BLE: could not set advertising data for %s (rc=%d)\n",
+                  kTiltColours[colourIndex].name, rc);
+    return false;
+  }
 
-  gAdvertising->setAdvertisementData(advData);
   gAdvertising->start();
   gSliceStartMs = millis();
   gIsAdvertising = true;
@@ -255,6 +267,22 @@ void setup() {
   // Set once: start() passes m_advParams every slice, and neither
   // setDeviceAddress() nor setAdvertisementData() disturbs the type.
   gAdvertising->setAdvertisementType(ADV_TYPE_SCAN_IND);
+
+  // Claim ownership of the advertising data, once, so the slices below can talk
+  // to the controller directly.
+  //
+  // BLEAdvertising::start() reconfigures the data itself unless m_customAdvData
+  // is set (BLEAdvertising.cpp:211) -- it would push its own struct, complete
+  // with the device name, straight over whatever
+  // esp_ble_gap_config_adv_data_raw() had just written, every single slice. That
+  // flag is private with no setter, and calling setAdvertisementData() is the
+  // only thing that turns it on. So it is called exactly once here, with the
+  // real first-colour bytes, purely for its side effect; from then on every
+  // slice writes raw and start() leaves the data alone.
+  BLEAdvertisementData claimCustomData;
+  claimCustomData.setFlags(kAdvFlags);
+  claimCustomData.setManufacturerData(std::string());
+  gAdvertising->setAdvertisementData(claimCustomData);
 
   Serial.printf("BLE: %u colours rotate every %lu ms, readings refresh every %lu ms\n",
                 static_cast<unsigned>(kTiltCount), kSliceMs, kCyclePeriodMs);
