@@ -9,6 +9,7 @@
 
 #include "heap.h"
 #include "net.h"
+#include "ota_rollback.h"
 #include "tilt_config.h"
 #include "tilt_encoding.h"
 #include "version.h"
@@ -223,6 +224,11 @@ void setup() {
   const esp_reset_reason_t resetReason = esp_reset_reason();
   Serial.printf("Boot: reset reason %s\n", resetReasonName(resetReason));
 
+  // Early, and before anything that can fail: this is the half of "why did it
+  // boot like that" the reset reason cannot answer, and a panic further down
+  // setup() is precisely the case it exists to recover from.
+  otaRollbackBegin();
+
   configBegin();
   configPrint();
 
@@ -303,6 +309,7 @@ void loop() {
   configFlushIfDue();
   netLoop();
   webServerLoop();
+  otaRollbackLoop();
   logHealth(now);
 
   // Leave the radio and CPU to the upload; it reboots when it finishes.

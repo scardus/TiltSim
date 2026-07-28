@@ -22,3 +22,9 @@ void webServerLoop();
 // True while a firmware upload is in progress, so the BLE scheduler can stand
 // down and leave the radio and CPU to it.
 bool webOtaInProgress();
+
+// Whether the server is actually listening. Distinct from webServerBegin()'s
+// return: that reports the first attempt, and the bind can succeed on a later
+// retry. This is the live answer, and it is what tells a freshly installed
+// image apart from one whose admin UI never came back.
+bool webServerIsBound();
