@@ -140,6 +140,13 @@ void handleState(AsyncWebServerRequest* request) {
   doc["heapFree"] = ESP.getFreeHeap();
   doc["heapLargestBlock"] = largestUsableBlock();
 
+  // Bytes never used on the AsyncTCP task's stack, at its deepest point since
+  // boot. Reported because that stack is taken from the heap and held for the
+  // life of the device, on a device whose largest usable block is the number
+  // above it: its size is worth knowing, and worth being able to re-check after
+  // a library update rather than trusting a measurement taken once.
+  doc["tcpStackFree"] = uxTaskGetStackHighWaterMark(nullptr);
+
   // Snapshot under the lock, build the JSON outside it. Each insert below can
   // allocate, and doing ~70 of them against a fragmented heap while holding the
   // lock blocked loop()'s buildSchedule() and every other handler for the
