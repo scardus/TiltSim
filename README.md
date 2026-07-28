@@ -1,13 +1,18 @@
-# Tilt Simulator: ESP32 Tilt Hydrometer Emulator
+# Tilt Simulator: ESP32 Hydrometer Emulator
 
 A PlatformIO project for the ESP32 that pretends to be up to eight Tilt
-hydrometers at once, so brewing controllers can be tested without tying up real
-hardware or waiting on a real fermentation.
+hydrometers and four iSpindels at once, so brewing controllers can be tested
+without tying up real hardware or waiting on a real fermentation.
+
+The two are opposites, and the device does both at the same time. A Tilt is a
+passive BLE beacon a receiver has to go looking for; an iSpindel wakes on a
+timer and HTTP POSTs its reading to an endpoint you nominate. Between them they
+exercise both halves of a typical setup.
 
 Everything is controlled from a web page on the device — which colours are
-advertising, their temperature and gravity, how much those readings wander, and
-whether each one behaves as a standard Tilt or a Tilt Pro. Firmware updates go
-over the same page.
+advertising, their temperature and gravity, how much those readings wander,
+whether each Tilt behaves as a standard or a Pro, and where each iSpindel posts.
+Firmware updates go over the same page.
 
 ## Getting started
 
@@ -113,6 +118,53 @@ The one thing that is not a rename is the address byte order: Bluedroid takes
 the six bytes most significant first, NimBLE least significant first, so
 `bleAddressLittleEndian()` sits between the two and is pinned by a test.
 
+## iSpindel emulation
+
+Four iSpindel / Gravitymon slots sit below the Tilts on the same page. Each has
+a name, an endpoint to post to, and the same temperature, gravity and variance
+controls as a Tilt. There is no Pro switch — that is a Tilt distinction.
+
+Every 15 minutes each enabled slot with an endpoint POSTs a JSON body:
+
+```json
+{ "name": "ispindel-1", "ID": "C2CC7C", "token": "gravmon", "interval": 900,
+  "temperature": 68.0, "temp_units": "F", "gravity": 1.0500,
+  "angle": 45.34, "battery": 3.67, "RSSI": -12 }
+```
+
+Only `name`, `ID`, `temperature` and `gravity` mean anything. `token`, `angle`,
+`battery` and `RSSI` are fixed placeholders — nothing here models a battery, a
+tilt angle or a link budget, and inventing plausible movement for them would
+make the simulation look more faithful than it is. They live as named constants
+in `lib/ispindel_encoding/`.
+
+Some details worth knowing:
+
+- **`ID` is derived from the board's MAC**, one per slot, so it is stable across
+  restarts and unique to the board. Same trick as the Tilt BLE addresses, and
+  from the same `efuseMacBytes()` helper, so the IDs, the hostname and the BLE
+  addresses cannot drift apart.
+- **Temperature always goes out in Fahrenheit**, so `temp_units` is always `"F"`.
+  A real iSpindel can be configured either way, but the simulator stores °F
+  throughout — that is what a Tilt advertises, and one internal unit avoids a
+  second conversion path that could disagree with the first. The °C toggle
+  converts for display only.
+- **Slots start disabled with no endpoint.** One enabled by default would POST
+  to whatever is now being served at the URL its previous owner typed.
+- **Saving a slot posts straight away**, so a freshly typed URL can be checked
+  without waiting a quarter of an hour. Outcomes go to the serial log — the page
+  shows no delivery status.
+- **`https://` works, but certificates are not validated.** Real iSpindel and
+  Gravitymon firmware does the same: there is nowhere to keep a trust store and
+  no clock to check validity against. A machine on the path could read or alter
+  the readings. The handshake needs about 37 KB of contiguous heap while it runs,
+  which is affordable now and was not before the NimBLE migration.
+- **Posting happens on its own FreeRTOS task.** `HTTPClient` is blocking, and a
+  dead endpoint would otherwise stall the BLE rotation for as long as it took to
+  time out. The task is only created once a slot has an endpoint, and its 16 KB
+  stack comes from the heap — an earlier version put that array in `.bss` and
+  called it free, which is inverted: `.bss` and the heap are the same DRAM.
+
 ## Firmware updates
 
 Upload a `firmware.bin` on the **Firmware** page. Advertising stops during the
@@ -144,9 +196,11 @@ pio check --fail-on-defect=high          # static analysis
 ```
 
 Unit tests cover `lib/tilt_encoding` — the advertised payload byte for byte, the
-Pro scaling and clamping, and the rotation maths. They run on the target because
-there is no host compiler assumed; the module is Arduino-free so it links into
-the test runner without dragging in `main.cpp`.
+Pro scaling and clamping, and the rotation maths — and `lib/ispindel_encoding` —
+the posted JSON field by field, the escaping of user-entered names, and the
+per-slot device IDs. They run on the target because there is no host compiler
+assumed; both modules are Arduino-free so they link into the test runner without
+dragging in `main.cpp`.
 
 The payload is assembled in `buildIBeaconPayload()` rather than with the
 framework's `BLEBeacon` class, deliberately. `BLEBeacon` byte-swaps every 16-bit
@@ -158,10 +212,13 @@ function keeps the on-air order pinned by `test_payload_matches_reference_byte_f
 Two things in `platformio.ini` are worth knowing:
 
 - `board_build.partitions = min_spiffs.csv`. This was once forced: Bluedroid
-  alone filled 85% of the default 1.25 MB app slot. On NimBLE the image is
-  1.19 MB and would fit the default scheme again — but changing the partition
-  table cannot be done over OTA, so it stays. Both slots are 1.875 MB and the
-  image now uses 60% of one.
+  alone filled 85% of the default 1.25 MB app slot. Both slots are 1.875 MB and
+  the image uses 68% of one — the iSpindel side costs about 154 KB of that,
+  almost all of it mbedTLS, because `HTTPClient.h` includes
+  `WiFiClientSecure.h` unconditionally and links the whole TLS stack whether or
+  not it is used. That is also why `https://` is supported rather than refused:
+  the flash was already spent. Changing the partition table cannot be done over
+  OTA, so it stays regardless.
 - The three `CONFIG_BT_NIMBLE_ROLE_*=0` flags. This is a broadcaster and
   nothing else, so the client, scan and server roles are not compiled in. Note
   the names: the library's docs give a `MYNEWT_VAL_BLE_ROLE_*` spelling, which
@@ -177,11 +234,13 @@ Two things in `platformio.ini` are worth knowing:
 |---|---|
 | `src/main.cpp` | Setup, and the advertising scheduler |
 | `lib/tilt_encoding/` | Pure payload logic — UUIDs, scaling, rotation timing |
+| `lib/ispindel_encoding/` | Pure iSpindel logic — the posted JSON and the slot IDs |
 | `src/tilt_config.cpp` | Runtime settings and NVS persistence |
+| `src/ispindel.cpp` | The posting task |
 | `src/net.cpp` | WiFi provisioning, hostname, mDNS |
 | `src/web_server.cpp` | HTTP API and OTA handler |
 | `src/ota_rollback.cpp` | Confirms a new image, or puts the old one back |
-| `include/web_assets.h` | The web UI, embedded in the firmware |
+| `src/web_assets.cpp` | The web UI, embedded in the firmware |
 
 The UI is compiled into the binary rather than served from a filesystem, so
 there is a single `.bin` to flash and an update cannot leave the firmware and
@@ -211,6 +270,7 @@ follow, and breaking either one is a real fault rather than a style point:
 | GET | `/api/state` | Full config plus hostname, IP, version, OTA slot and probation state, image hash, free heap |
 | POST | `/api/master` | `{"enabled": true\|false}` |
 | POST | `/api/tilt/<0-7>` | Partial patch of one tilt's settings |
+| POST | `/api/ispindel/<0-3>` | Partial patch of one iSpindel slot; a URL must start `http://` or `https://` or it is refused with 400 |
 | POST | `/api/reset-wifi` | Forget credentials and reboot into the portal |
 | POST | `/api/reboot` | Restart the device, keeping its settings |
 | POST | `/update` | Multipart firmware upload |
@@ -240,7 +300,14 @@ reaches the device. There is no Celsius form of these fields.
 curl -X POST http://tiltsim-a1b2c3.local/api/tilt/0 \
   -H 'Content-Type: application/json' \
   -d '{"enabled":true,"pro":true,"tempF":67.4,"gravity":1.0488}'
+
+curl -X POST http://tiltsim-a1b2c3.local/api/ispindel/0 \
+  -H 'Content-Type: application/json' \
+  -d '{"enabled":true,"url":"http://192.168.0.20:8080/ispindel"}'
 ```
+
+Saving an iSpindel slot posts a reading immediately rather than waiting for the
+next interval, so the endpoint can be checked straight away.
 
 ## Tilt colour UUIDs
 
