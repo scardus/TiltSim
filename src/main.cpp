@@ -1,11 +1,7 @@
 #include <Arduino.h>
-#include <BLEAdvertising.h>
-#include <BLEDevice.h>
-#include <esp_gap_ble_api.h>
+#include <NimBLEDevice.h>
 #include <esp_random.h>
 #include <esp_system.h>
-
-#include <string>
 
 #include "heap.h"
 #include "net.h"
@@ -18,7 +14,9 @@
 namespace {
 constexpr int8_t kMeasuredPower = -10;
 
-BLEAdvertising* gAdvertising = nullptr;
+// Filled in once by setup() and handed to every ble_gap_adv_start() unchanged.
+ble_gap_adv_params gAdvParams;
+
 unsigned long gCycleStartMs = 0;
 unsigned long gSliceStartMs = 0;
 unsigned long gCycleLengthMs = kCyclePeriodMs;
@@ -39,7 +37,12 @@ size_t gScheduleCount = 0;
 // slice is a single esp_ble_gap_config_adv_data_raw() call with nothing to
 // assemble and nothing to allocate.
 AdvData gAdvData[kTiltCount];
+
+// gAddresses is the printed order, which is what the per-cycle log shows;
+// gAddressesLe is the same addresses reversed for the stack. Both are derived
+// once at boot -- see bleAddressLittleEndian() for why the two exist.
 BleAddress gAddresses[kTiltCount];
+BleAddress gAddressesLe[kTiltCount];
 
 // Often enough to watch a leak develop, rare enough not to bury the per-cycle
 // colour lines.
@@ -148,26 +151,41 @@ bool startSlot(const size_t slotIndex) {
     return false;
   }
   const size_t colourIndex = gSchedule[slotIndex];
+  const char* const name = kTiltColours[colourIndex].name;
 
   // Must happen while stopped: the controller will not change the random
-  // address out from under an active advertisement.
-  gAdvertising->setDeviceAddress(gAddresses[colourIndex].data(),
-                                 BLE_ADDR_TYPE_RANDOM);
-
-  // Straight to the controller. The bytes were assembled at the cycle boundary,
-  // so this whole slice allocates nothing -- where going through
-  // BLEAdvertisementData took seven heap allocations every 200 ms. See
-  // buildAdvData() for the detail, and setup() for why start() below does not
-  // overwrite what this just configured.
-  const esp_err_t rc = esp_ble_gap_config_adv_data_raw(
-      gAdvData[colourIndex].data(), gAdvData[colourIndex].size());
-  if (rc != ESP_OK) {
-    Serial.printf("BLE: could not set advertising data for %s (rc=%d)\n",
-                  kTiltColours[colourIndex].name, rc);
+  // address out from under an active advertisement. Checked rather than fired
+  // and forgotten -- a rejected address leaves the previous colour's one in
+  // place, so every colour would air from one address and the receiver would
+  // collapse them all into a single Tilt. That is the exact fault the
+  // per-colour address exists to prevent, and it looks like healthy firmware.
+  if (!NimBLEDevice::setOwnAddr(gAddressesLe[colourIndex].data())) {
+    Serial.printf("BLE: could not set the address for %s\n", name);
     return false;
   }
 
-  gAdvertising->start();
+  // Straight to the controller: ble_gap_adv_set_data() is a thin wrapper on the
+  // HCI Set Advertising Data command and sends exactly these bytes, flags
+  // structure included. The bytes were assembled at the cycle boundary, so this
+  // whole slice allocates nothing -- where going through BLEAdvertisementData
+  // took seven heap allocations every 200 ms. See buildAdvData() for the detail.
+  int rc = ble_gap_adv_set_data(gAdvData[colourIndex].data(),
+                                static_cast<int>(gAdvData[colourIndex].size()));
+  if (rc != 0) {
+    Serial.printf("BLE: could not set advertising data for %s (rc=%d)\n", name,
+                  rc);
+    return false;
+  }
+
+  // No GAP event callback: a non-connectable advertisement running until it is
+  // stopped by hand produces no events to receive.
+  rc = ble_gap_adv_start(BLE_OWN_ADDR_RANDOM, nullptr, BLE_HS_FOREVER,
+                         &gAdvParams, nullptr, nullptr);
+  if (rc != 0) {
+    Serial.printf("BLE: could not start advertising %s (rc=%d)\n", name, rc);
+    return false;
+  }
+
   gSliceStartMs = millis();
   gIsAdvertising = true;
   return true;
@@ -189,7 +207,12 @@ void stopSlot() {
   if (!gIsAdvertising) {
     return;
   }
-  gAdvertising->stop();
+  const int rc = ble_gap_adv_stop();
+  if (rc != 0) {
+    Serial.printf("BLE: advertising would not stop (rc=%d)\n", rc);
+  }
+  // Cleared either way. If the controller is already stopped the flag was the
+  // thing that was wrong, and holding it true would wedge the rotation.
   gIsAdvertising = false;
 }
 // Why the device last restarted. This reboots for at least five different
@@ -258,37 +281,38 @@ void setup() {
     if (!tiltBleAddress(baseMac.data(), i, gAddresses[i])) {
       Serial.printf("Could not derive an address for %s\n", kTiltColours[i].name);
     }
+    bleAddressLittleEndian(gAddresses[i], gAddressesLe[i]);
   }
 
-  BLEDevice::init("ESP32-iBeacon");
-  gAdvertising = BLEDevice::getAdvertising();
-  gAdvertising->setScanResponse(false);
-
-  // A Tilt is a beacon, not something you connect to. The library default is
-  // ADV_TYPE_IND, which is connectable, so without this a receiver could open a
-  // connection and take the radio away mid-rotation. SCAN_IND is
-  // non-connectable but still scannable, so an active scanner's SCAN_REQ is
-  // still answered -- with an empty response, since scan data is off above.
+  // An empty name on purpose: it never airs. Scan response data is never set,
+  // and the advertisement is 30 of the 31 available bytes of iBeacon payload,
+  // so there is nowhere for a name to go even if one were wanted.
   //
-  // Set once: start() passes m_advParams every slice, and neither
-  // setDeviceAddress() nor setAdvertisementData() disturbs the type.
-  gAdvertising->setAdvertisementType(ADV_TYPE_SCAN_IND);
+  // init() does not return until the host and controller have synced, so the
+  // ble_gap_* calls below are safe from the next line onwards.
+  if (!NimBLEDevice::init("")) {
+    Serial.println("BLE: the stack would not start; no advertising this boot");
+  }
 
-  // Claim ownership of the advertising data, once, so the slices below can talk
-  // to the controller directly.
-  //
-  // BLEAdvertising::start() reconfigures the data itself unless m_customAdvData
-  // is set (BLEAdvertising.cpp:211) -- it would push its own struct, complete
-  // with the device name, straight over whatever
-  // esp_ble_gap_config_adv_data_raw() had just written, every single slice. That
-  // flag is private with no setter, and calling setAdvertisementData() is the
-  // only thing that turns it on. So it is called exactly once here, with the
-  // real first-colour bytes, purely for its side effect; from then on every
-  // slice writes raw and start() leaves the data alone.
-  BLEAdvertisementData claimCustomData;
-  claimCustomData.setFlags(kAdvFlags);
-  claimCustomData.setManufacturerData(std::string());
-  gAdvertising->setAdvertisementData(claimCustomData);
+  // A Tilt is a beacon, not something you connect to. NimBLE derives the
+  // advertising PDU type from these two rather than taking it by name:
+  // ble_gap_adv_type() in ble_gap.c maps CONN_MODE_NON with a discoverable
+  // disc_mode to ADV_SCAN_IND, and only pairs it with DISC_MODE_NON to get
+  // ADV_NONCONN_IND. So this is the same SCAN_IND the Bluedroid build aired --
+  // non-connectable, so nothing can open a connection and take the radio away
+  // mid-rotation, but still scannable, so an active scanner's SCAN_REQ is
+  // answered with an empty response.
+  gAdvParams = {};
+  gAdvParams.conn_mode = BLE_GAP_CONN_MODE_NON;
+  gAdvParams.disc_mode = BLE_GAP_DISC_MODE_GEN;
+
+  // Set explicitly because NimBLE's defaults are not Bluedroid's. Left at zero
+  // the host substitutes its own slower pair, which would thin out the packets
+  // sent inside each 200 ms slice -- and the number of packets a colour gets
+  // into a receiver's scan window is the whole point of the rotation. 0x20 and
+  // 0x40 are 20 ms and 40 ms, matching what BLEAdvertising used to default to.
+  gAdvParams.itvl_min = 0x20;
+  gAdvParams.itvl_max = 0x40;
 
   Serial.printf("BLE: %u colours rotate every %lu ms, readings refresh every %lu ms\n",
                 static_cast<unsigned>(kTiltCount), kSliceMs, kCyclePeriodMs);
