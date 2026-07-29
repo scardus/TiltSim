@@ -5,7 +5,10 @@
 #include <WiFiManager.h>
 #include <esp_wifi.h>
 
+#include <memory>
+
 #include "tilt_encoding.h"
+#include "web_server.h"
 
 namespace {
 // Long enough to type a password on a phone, short enough that a headless
@@ -19,6 +22,17 @@ constexpr unsigned long kReconnectIntervalMs = 30000;
 constexpr uint8_t kConnectRetries = 3;
 constexpr unsigned long kConnectTimeoutSec = 10;
 
+// How many 30 s reconnect attempts to make before offering the setup portal.
+// Four is two minutes, which covers a router rebooting without bothering
+// anybody; past that the saved network may simply not exist any more.
+constexpr unsigned kReconnectsBeforePortal = 4;
+
+// How long the portal stays up before going back to trying the saved network.
+// Long enough to notice the AP and connect a phone to it, short enough that a
+// device nobody is attending returns to retrying by itself. The two alternate
+// for as long as it takes.
+constexpr unsigned long kPortalWindowMs = 120000;
+
 String gHostname;
 // The AP last seen associated, so a change can be reported. Empty until the
 // first connection, which is what stops the first pass logging a "move".
@@ -26,6 +40,13 @@ String gBssid;
 bool gMdnsStarted = false;
 bool gPortalSaved = false;
 unsigned long gLastReconnectMs = 0;
+
+// Non-null only while the setup portal is up. Heap rather than a permanent
+// member because WiFiManager carries a synchronous WebServer and a DNS server
+// with it, and this device spends nearly all its life not needing either.
+std::unique_ptr<WiFiManager> gPortal;
+unsigned long gPortalStartedMs = 0;
+unsigned gFailedReconnects = 0;
 
 void startMdns() {
   if (gMdnsStarted) {
@@ -42,6 +63,40 @@ void startMdns() {
   }
   gMdnsStarted = true;
   Serial.printf("mDNS: http://%s.local\n", gHostname.c_str());
+}
+
+// Raises the portal without blocking, so the BLE rotation keeps running while
+// it is up. The device is useless as a beacon if provisioning stops it dead for
+// two minutes at a time, and this can happen repeatedly.
+void startPortal() {
+  Serial.printf("WiFi: no link after %u attempts, raising the setup portal on "
+                "SSID %s for %lu s\n",
+                gFailedReconnects, gHostname.c_str(), kPortalWindowMs / 1000);
+
+  // The portal's own server wants port 80, and ours already has it.
+  webServerSuspend();
+
+  gPortal.reset(new WiFiManager);
+  gPortal->setHostname(gHostname.c_str());
+  gPortal->setDarkMode(true);
+  gPortal->setSaveConfigCallback([]() { gPortalSaved = true; });
+  // setConfigPortalTimeout is documented as unused in non-blocking mode, so the
+  // window below is timed here instead.
+  gPortal->setConfigPortalBlocking(false);
+  gPortal->startConfigPortal(gHostname.c_str());
+  gPortalStartedMs = millis();
+}
+
+void stopPortal(const char* why) {
+  if (!gPortal) {
+    return;
+  }
+  Serial.printf("WiFi: %s, closing the setup portal\n", why);
+  gPortal->stopConfigPortal();
+  gPortal.reset();
+  gFailedReconnects = 0;
+  gLastReconnectMs = millis();
+  webServerResume();
 }
 }  // namespace
 
@@ -149,7 +204,21 @@ bool netBegin() {
 }
 
 void netLoop() {
+  // Credentials arrived through the portal. Restart rather than carry on: the
+  // browser that submitted the form still holds a socket to the portal's
+  // server, which keeps port 80 out of reach for up to ~80 s, and a fresh boot
+  // connects straight from NVS without opening it at all.
+  if (gPortalSaved) {
+    Serial.println("WiFi: credentials saved, restarting");
+    Serial.flush();
+    delay(200);
+    ESP.restart();
+  }
+
   if (WiFi.status() == WL_CONNECTED) {
+    if (gPortal) {
+      stopPortal("link is back");
+    }
     // mDNS cannot start until there is an address, so cover the case where the
     // link came up after boot.
     startMdns();
@@ -169,11 +238,36 @@ void netLoop() {
   }
 
   const unsigned long now = millis();
+
+  // While the portal is up it needs servicing, and it owns the window.
+  if (gPortal) {
+    gPortal->process();
+    if (now - gPortalStartedMs >= kPortalWindowMs) {
+      // Nobody used it. Go back to the saved network -- the far more likely
+      // explanation is still a router that has not come back yet, and this
+      // device's job is to be a beacon, not an access point.
+      stopPortal("portal went unused");
+    }
+    return;
+  }
+
   if (now - gLastReconnectMs < kReconnectIntervalMs) {
     return;
   }
   gLastReconnectMs = now;
-  Serial.println("WiFi: link down, reconnecting");
+
+  // Enough retrying: offer a way in. The saved network may genuinely be gone --
+  // moved house, renamed SSID, new router -- and without this the device would
+  // retry a network that no longer exists forever, with no way to tell it
+  // otherwise short of a USB cable.
+  ++gFailedReconnects;
+  if (gFailedReconnects >= kReconnectsBeforePortal) {
+    startPortal();
+    return;
+  }
+
+  Serial.printf("WiFi: link down, reconnecting (%u/%u before the portal)\n",
+                gFailedReconnects, kReconnectsBeforePortal);
   if (!WiFi.reconnect()) {
     // Retried on the next interval regardless; logged so a link that never
     // comes back is distinguishable from one that reconnects and drops again.

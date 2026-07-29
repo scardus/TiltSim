@@ -28,3 +28,13 @@ bool webOtaInProgress();
 // retry. This is the live answer, and it is what tells a freshly installed
 // image apart from one whose admin UI never came back.
 bool webServerIsBound();
+
+// Gives up port 80, and stops the rebind retry until webServerResume().
+//
+// For the setup portal, which runs its own server on the same port. AsyncTCP
+// binds with the raw lwIP API and no SO_REUSEADDR, so whichever of the two is
+// second simply fails -- and AsyncServer::begin() returns void, so it fails
+// silently and the portal would come up unreachable. Standing aside is the only
+// way both can exist on one device.
+void webServerSuspend();
+void webServerResume();
