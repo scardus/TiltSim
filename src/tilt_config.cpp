@@ -9,10 +9,7 @@
 AppConfig gConfig;
 
 namespace {
-// Bump the low byte whenever the layout of AppConfig changes; a mismatch makes
-// the device fall back to defaults rather than read a stale struct.
-// TIL2 added the iSpindel slots.
-constexpr uint32_t kConfigMagic = 0x54494C32;  // "TIL2"
+// kConfigMagic lives in config_schema.h, next to the layout it describes.
 constexpr char kPrefsNamespace[] = "tiltsim";
 constexpr char kPrefsKey[] = "cfg";
 
@@ -33,19 +30,6 @@ bool gHaveSavedCrc = false;
 uint32_t configCrc(const AppConfig& config) {
   return esp_rom_crc32_le(0, reinterpret_cast<const uint8_t*>(&config),
                           sizeof(config));
-}
-
-float clampFloat(const float value, const float low, const float high) {
-  if (!isfinite(value)) {
-    return low;
-  }
-  if (value < low) {
-    return low;
-  }
-  if (value > high) {
-    return high;
-  }
-  return value;
 }
 
 void applyDefaults() {
@@ -170,27 +154,6 @@ void configBegin() {
     configClampIspindel(gConfig.ispindels[i]);
   }
   Serial.println("Config: loaded from NVS");
-}
-
-void configClampTilt(TiltSettings& tilt) {
-  tilt.tempF = clampFloat(tilt.tempF, kMinTempF, kMaxTempF);
-  tilt.gravity = clampFloat(tilt.gravity, kMinGravity, kMaxGravity);
-  tilt.tempVarianceF = clampFloat(tilt.tempVarianceF, 0.0f, kMaxTempVarianceF);
-  tilt.gravityVariance = clampFloat(tilt.gravityVariance, 0.0f, kMaxGravityVariance);
-}
-
-void configClampIspindel(IspindelSettings& ispindel) {
-  ispindel.tempF = clampFloat(ispindel.tempF, kMinTempF, kMaxTempF);
-  ispindel.gravity = clampFloat(ispindel.gravity, kMinGravity, kMaxGravity);
-  ispindel.tempVarianceF =
-      clampFloat(ispindel.tempVarianceF, 0.0f, kMaxTempVarianceF);
-  ispindel.gravityVariance =
-      clampFloat(ispindel.gravityVariance, 0.0f, kMaxGravityVariance);
-
-  // A blob read back from NVS is only as trustworthy as whatever wrote it, and
-  // both of these are handed to string functions afterwards.
-  ispindel.name[sizeof(ispindel.name) - 1] = '\0';
-  ispindel.url[sizeof(ispindel.url) - 1] = '\0';
 }
 
 float randomVariance(const float range) {

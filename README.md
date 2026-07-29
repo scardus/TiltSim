@@ -218,16 +218,33 @@ to nothing.
 pio run                                  # build
 pio run -t upload                        # flash over USB (COM7)
 pio device monitor                       # serial log, 115200
-pio test -e esp32dev                     # unit tests, run on the board
-pio check --fail-on-defect=high          # static analysis
+pio test -e native                       # unit tests on the host, ~5 s
+pio test -e esp32dev                     # the same tests on the board, ~2 min
+pio check --fail-on-defect=medium        # static analysis
 ```
 
-Unit tests cover `lib/tilt_encoding` — the advertised payload byte for byte, the
-Pro scaling and clamping, and the rotation maths — and `lib/ispindel_encoding` —
-the posted JSON field by field, the escaping of user-entered names, and the
-per-slot device IDs. They run on the target because there is no host compiler
-assumed; both modules are Arduino-free so they link into the test runner without
-dragging in `main.cpp`.
+Everything under test lives in `lib/` and is Arduino-free, so it links into the
+test runner without dragging in `main.cpp` — and the same four suites build for
+a desktop compiler as well as the target:
+
+| Suite | Covers |
+|---|---|
+| `test_tilt_encoding` | The advertised payload byte for byte, Pro scaling and clamping, rotation maths, the per-colour BLE addresses |
+| `test_ispindel_encoding` | The posted JSON field by field, escaping of user-entered names, the per-slot device IDs |
+| `test_web_support` | Reassembly of a multi-part page at every chunk size, and the OTA stall clock including wraparound |
+| `test_config_schema` | The persisted `AppConfig` layout pinned to its magic, the value clamps, and URL validation |
+
+Prefer `-e native` while working: it is about twenty times faster, needs no
+board, and does not leave the bench board holding a test binary. The on-target
+run stays the authority for anything whose answer can depend on the target —
+above all the `AppConfig` offsets, since that struct is what sits in NVS. Both
+currently agree.
+
+Running natively needs a host `g++` on `PATH`; on Windows,
+`winget install BrechtSanders.WinLibs.POSIX.UCRT` provides one. Without it, use
+`-e esp32dev` and let CI cover the host build — `.github/workflows/ci.yml` runs
+the build, the native suites and the static analysis on every push, since the
+runner has no board to flash.
 
 The payload is assembled in `buildIBeaconPayload()` rather than with the
 framework's `BLEBeacon` class, deliberately. `BLEBeacon` byte-swaps every 16-bit
@@ -262,6 +279,8 @@ Unity package that `pio test` installs.
 | `src/main.cpp` | Setup, and the advertising scheduler |
 | `lib/tilt_encoding/` | Pure payload logic — UUIDs, scaling, rotation timing |
 | `lib/ispindel_encoding/` | Pure iSpindel logic — the posted JSON and the slot IDs |
+| `lib/config_schema/` | The persisted layout, its magic, the value clamps and URL validation |
+| `lib/web_support/` | Multi-part page assembly and the OTA stall clock |
 | `src/tilt_config.cpp` | Runtime settings and NVS persistence |
 | `src/ispindel.cpp` | The posting task |
 | `src/net.cpp` | WiFi provisioning, hostname, mDNS |

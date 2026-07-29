@@ -1,0 +1,53 @@
+name: CI
+
+# Every push and pull request. The weekly platformio-dependabot.yml workflow is
+# left alone -- it is scheduled, it opens PRs, and bolting the tests onto it
+# would mean a broken payload could sit in main for six days before anything
+# noticed.
+on:
+  push:
+  pull_request:
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Cache pip
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/platformio.ini') }}
+
+      - name: Cache PlatformIO
+        uses: actions/cache@v6
+        with:
+          path: ~/.platformio
+          key: ${{ runner.os }}-platformio-${{ hashFiles('**/platformio.ini') }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.x'
+
+      - name: Install PlatformIO
+        run: |
+          python -m pip install --upgrade pip
+          pip install --upgrade platformio
+
+      # Also what enforces the static_assert in makeAsset() against the real
+      # five-part index page: a sixth part fails here rather than serving a page
+      # with its tail missing.
+      - name: Build firmware
+        run: pio run
+
+      # The runner has no board, so these are the host builds of the same four
+      # suites the bench board runs. Everything under test is Arduino-free; see
+      # [env:native] in platformio.ini.
+      - name: Run unit tests
+        run: pio test -e native
+
+      - name: Static analysis
+        run: pio check --fail-on-defect medium --fail-on-defect high

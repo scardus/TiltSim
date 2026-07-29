@@ -1,4 +1,9 @@
+// Runs both on the target and on a desktop compiler. Everything under test is
+// Arduino-free, so the only thing that has to differ is the entry point at the
+// bottom of this file -- and Arduino.h itself, which does not exist on a host.
+#ifdef ARDUINO
 #include <Arduino.h>
+#endif
 #include <unity.h>
 
 #include "tilt_encoding.h"
@@ -285,10 +290,7 @@ void test_address_rejects_bad_input() {
   TEST_ASSERT_FALSE(tiltBleAddress(base, 99, addr));
 }
 
-void setup() {
-  // Give the host serial monitor time to attach before the results stream out.
-  delay(2000);
-  UNITY_BEGIN();
+static void runAllTests() {
   RUN_TEST(test_payload_matches_reference_byte_for_byte);
   RUN_TEST(test_adv_data_matches_the_canonical_iBeacon_advertisement);
   RUN_TEST(test_adv_data_length_bytes_describe_their_own_structures);
@@ -307,7 +309,22 @@ void setup() {
   RUN_TEST(test_addresses_are_stable_and_device_specific);
   RUN_TEST(test_addresses_reverse_into_the_order_the_stack_expects);
   RUN_TEST(test_address_rejects_bad_input);
+}
+
+#ifdef ARDUINO
+void setup() {
+  // Give the host serial monitor time to attach before the results stream out.
+  delay(2000);
+  UNITY_BEGIN();
+  runAllTests();
   UNITY_END();
 }
 
 void loop() {}
+#else
+int main() {
+  UNITY_BEGIN();
+  runAllTests();
+  return UNITY_END();
+}
+#endif
