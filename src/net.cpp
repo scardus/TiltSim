@@ -3,6 +3,7 @@
 #include <ESPmDNS.h>
 #include <WiFi.h>
 #include <WiFiManager.h>
+#include <esp_wifi.h>
 
 #include "tilt_encoding.h"
 
@@ -11,6 +12,12 @@ namespace {
 // device left on a dead network gets back to advertising.
 constexpr unsigned long kPortalTimeoutSec = 180;
 constexpr unsigned long kReconnectIntervalMs = 30000;
+
+// Three attempts of ten seconds, against a default of one attempt of sixty.
+// Ten is comfortably longer than a successful associate, which the boot log
+// puts at five to nine seconds.
+constexpr uint8_t kConnectRetries = 3;
+constexpr unsigned long kConnectTimeoutSec = 10;
 
 String gHostname;
 // The AP last seen associated, so a change can be reported. Empty until the
@@ -68,13 +75,50 @@ bool netBegin() {
   wm.setHostname(hostname.c_str());
   wm.setConfigPortalTimeout(kPortalTimeoutSec);
   wm.setDarkMode(true);
+
+  // Three short attempts rather than one long one. The default is a single try
+  // with a 60 s timeout, and measured on the bench board that single try fails
+  // on about half of all hard resets -- a power cut, in other words. A second
+  // attempt costs nothing when the first succeeds, and the whole sequence still
+  // gives up sooner than the old single attempt did.
+  wm.setConnectRetries(kConnectRetries);
+  wm.setConnectTimeout(kConnectTimeoutSec);
+
+  // Do not open the captive portal just because the network was not there at
+  // the moment this device happened to boot. Failing to associate is usually a
+  // router that is still coming up, not credentials that have gone wrong, and
+  // the portal is a poor response to it: it blocks for three minutes, stops the
+  // device answering on the real network, and expects somebody to be standing
+  // there. netLoop() retries instead, and the portal is kept for the case it is
+  // actually for -- no credentials stored at all.
+  wm.setEnableConfigPortal(false);
   // Fires only when the portal actually saved a network, so this stays false on
   // the ordinary connect-from-NVS boot.
   wm.setSaveConfigCallback([]() { gPortalSaved = true; });
 
   Serial.printf("WiFi: connecting as %s\n", hostname.c_str());
-  if (!wm.autoConnect(hostname.c_str())) {
-    Serial.println("WiFi: not connected, continuing offline");
+
+  // With the portal disabled above, autoConnect() would answer an unprovisioned
+  // device the same way it answers an unreachable router: false, and no way to
+  // fix it. Ask first, and raise the portal deliberately for the one case that
+  // needs a human. Reading the config is safe -- measured over 18 boots, it has
+  // no effect on whether the connect succeeds.
+  wifi_config_t stored = {};
+  const bool haveCredentials =
+      esp_wifi_get_config(WIFI_IF_STA, &stored) == ESP_OK &&
+      stored.sta.ssid[0] != '\0';
+
+  if (!haveCredentials) {
+    Serial.println("WiFi: no stored network, raising the setup portal");
+    if (!wm.startConfigPortal(hostname.c_str())) {
+      Serial.println("WiFi: portal closed without a network, continuing offline");
+      return false;
+    }
+  } else if (!wm.autoConnect(hostname.c_str())) {
+    // Not fatal any more. The caller starts the web server regardless, and
+    // netLoop() keeps retrying, so this recovers by itself when the network
+    // comes back rather than needing a reboot nobody is there to give it.
+    Serial.println("WiFi: no link yet, retrying in the background");
     return false;
   }
 
