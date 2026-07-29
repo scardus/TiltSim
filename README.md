@@ -29,8 +29,9 @@ to a minute or so after it closes, and the admin server cannot bind underneath
 it. Connecting from the stored credentials on the next boot never opens the
 portal at all.
 
-If the saved network is unreachable the portal reappears for three minutes,
-then the device carries on advertising offline.
+A device with no stored network raises that portal and waits three minutes for
+somebody to fill it in. Once a network is saved the portal stays out of the way,
+including when the network is missing — see [Staying connected](#staying-connected).
 
 ## Web interface
 
@@ -165,6 +166,46 @@ Some details worth knowing:
   stack comes from the heap — an earlier version put that array in `.bss` and
   called it free, which is inverted: `.bss` and the heap are the same DRAM.
 
+## Staying connected
+
+This device is expected to be headless, mains-powered and out of reach, so a
+power cut must not need a human. Boot makes three connect attempts of ten
+seconds each rather than the single sixty-second attempt WiFiManager does by
+default, and **the web server starts whether or not any of them worked**. That
+second part is the one that matters: the bind is retried from the main loop, so
+the admin page comes back on its own when the link does.
+
+It used to be fatal instead. Measured over eighteen hard resets on the bench
+board, nine failed to associate — and because the web server was only started
+when the first attempt succeeded, every one of those nine left the device
+associated a half-minute later, pingable, advertising happily, with nothing
+listening on port 80 until somebody power-cycled it. Twenty-two of twenty-two
+boots came back after the change.
+
+When the link is down `netLoop()` retries every 30 s. After four of those, about
+two minutes, the setup portal goes up for two minutes, and then the device goes
+back to retrying — the two alternate for as long as it takes. The retrying alone
+would be wrong, because a network that is genuinely gone (moved house, renamed
+SSID, new router) would then be unfixable without a USB cable; the portal alone
+would be wrong too, because a router that is merely slow to come back does not
+need one. The link returning closes the portal immediately.
+
+That portal is **non-blocking**, driven from `netLoop()` with a window timed by
+hand because `setConfigPortalTimeout` is documented as unused in that mode. A
+blocking portal would stop the BLE rotation for two minutes at a time, over and
+over, on a device whose entire job is to advertise. Both web servers want port
+80 and AsyncTCP binds without `SO_REUSEADDR`, so the admin server is suspended
+while the portal holds it and resumed afterwards.
+
+The boot line and `/api/state` both carry the BSSID alongside the RSSI, and a
+reconnect that lands on a different access point is logged. Several APs answer
+for one SSID here, and a weak link is either a near AP fading or an association
+with a distant one — the RSSI alone cannot tell those apart. Note that *which*
+AP gets picked is not controllable from here: `WiFi.setScanMethod()` is not read
+by the no-argument `WiFi.begin()` that WiFiManager connects through, so setting
+it does nothing at all. It was measured, and it is a dead end rather than an
+oversight.
+
 ## Firmware updates
 
 Upload a `firmware.bin` on the **Firmware** page. Advertising stops during the
@@ -267,7 +308,7 @@ follow, and breaking either one is a real fault rather than a style point:
 
 | Method | Path | Purpose |
 |---|---|---|
-| GET | `/api/state` | Full config plus hostname, IP, version, OTA slot and probation state, image hash, free heap |
+| GET | `/api/state` | Full config plus hostname, IP, BSSID and RSSI, version, OTA slot and probation state, image hash, free heap and largest free block |
 | POST | `/api/master` | `{"enabled": true\|false}` |
 | POST | `/api/tilt/<0-7>` | Partial patch of one tilt's settings |
 | POST | `/api/ispindel/<0-3>` | Partial patch of one iSpindel slot; a URL must start `http://` or `https://` or it is refused with 400 |
