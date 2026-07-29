@@ -98,6 +98,9 @@ void finishResponse(AsyncWebServerRequest* request, AsyncWebServerResponse* resp
 // headless device whose admin UI never comes back is bad enough to warrant one.
 bool gRoutesRegistered = false;
 bool gBound = false;
+// Set while the setup portal owns port 80. Suppresses the rebind retry, which
+// would otherwise fight the portal for the port every five seconds.
+bool gSuspended = false;
 bool gBindFailureLogged = false;
 unsigned long gLastBindAttemptMs = 0;
 constexpr unsigned long kBindRetryMs = 5000;
@@ -145,6 +148,10 @@ void handleState(AsyncWebServerRequest* request) {
   doc["hostname"] = netHostname();
   doc["ip"] = netIpAddress();
   doc["connected"] = netIsConnected();
+  // Which AP, and how well heard. Several APs answer for this SSID, so these
+  // two together are what distinguish a fading link from a poorly chosen one.
+  doc["bssid"] = netBssid();
+  doc["rssi"] = netRssi();
 
   // Which OTA slot is running, and the image hash. An update is only proven to
   // have taken when these change - the build date comes from whichever
@@ -654,6 +661,31 @@ bool webServerIsBound() {
   return gBound;
 }
 
+void webServerSuspend() {
+  if (gSuspended) {
+    return;
+  }
+  gSuspended = true;
+  if (gBound) {
+    gServer.end();
+    gBound = false;
+    Serial.println("HTTP: released port 80 for the setup portal");
+  }
+}
+
+void webServerResume() {
+  if (!gSuspended) {
+    return;
+  }
+  gSuspended = false;
+  // Not rebound here: the port the portal was using can linger in TIME_WAIT for
+  // a while after it closes, and webServerLoop() is already the thing that
+  // retries a bind patiently. Let it.
+  gLastBindAttemptMs = 0;
+  gBindFailureLogged = false;
+  Serial.println("HTTP: port 80 free again, rebinding shortly");
+}
+
 void webServerLoop() {
   // An upload whose connection dies mid-flight never delivers a final chunk and
   // never reports a write error, so nothing else clears gOtaActive -- and while
@@ -694,7 +726,7 @@ void webServerLoop() {
 
   // gRoutesRegistered guards against binding a server with no handlers on it:
   // an offline boot never calls webServerBegin() at all.
-  if (gRoutesRegistered && !gBound &&
+  if (gRoutesRegistered && !gBound && !gSuspended &&
       millis() - gLastBindAttemptMs >= kBindRetryMs) {
     gLastBindAttemptMs = millis();
     if (tryBind()) {

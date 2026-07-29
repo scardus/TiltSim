@@ -263,9 +263,17 @@ void setup() {
 
   // Before BLE: the captive portal blocks, and there is no point holding the
   // BLE stack's memory while it does.
-  if (netBegin()) {
-    webServerBegin();
-  }
+  // Started whether or not the link came up. webServerBegin() registers the
+  // routes and tries the bind; webServerLoop() retries that bind every few
+  // seconds, so the UI appears by itself once the network does.
+  //
+  // Gating this on netBegin() is what turned a failed first connect into a
+  // permanent outage: netLoop() would reconnect the WiFi half a minute later
+  // and the device would sit there associated, pingable and advertising, with
+  // nothing listening on port 80 until somebody power cycled it. On a board
+  // with no USB access that is a trip to the device.
+  netBegin();
+  webServerBegin();
 
   // After the network, because posting without one is pointless, and before
   // NimBLEDevice::init() below, because that is the roomiest the heap ever is
