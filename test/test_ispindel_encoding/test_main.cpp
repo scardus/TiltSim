@@ -1,4 +1,9 @@
+// Runs both on the target and on a desktop compiler. Everything under test is
+// Arduino-free -- ArduinoJson builds on a host too -- so the only thing that has
+// to differ is the entry point at the bottom of this file, and Arduino.h itself.
+#ifdef ARDUINO
 #include <Arduino.h>
+#endif
 #include <ArduinoJson.h>
 #include <unity.h>
 
@@ -150,10 +155,7 @@ void test_id_rejects_bad_input() {
   TEST_ASSERT_FALSE(ispindelId(kBase, 0, tooSmall, sizeof(tooSmall)));
 }
 
-void setup() {
-  // Give the host serial monitor time to attach before the results stream out.
-  delay(2000);
-  UNITY_BEGIN();
+static void runAllTests() {
   RUN_TEST(test_payload_has_every_field_a_receiver_expects);
   RUN_TEST(test_temperature_is_always_fahrenheit);
   RUN_TEST(test_name_with_json_metacharacters_is_escaped);
@@ -163,7 +165,22 @@ void setup() {
   RUN_TEST(test_ids_are_distinct_for_every_slot);
   RUN_TEST(test_ids_are_stable_and_device_specific);
   RUN_TEST(test_id_rejects_bad_input);
+}
+
+#ifdef ARDUINO
+void setup() {
+  // Give the host serial monitor time to attach before the results stream out.
+  delay(2000);
+  UNITY_BEGIN();
+  runAllTests();
   UNITY_END();
 }
 
 void loop() {}
+#else
+int main() {
+  UNITY_BEGIN();
+  runAllTests();
+  return UNITY_END();
+}
+#endif

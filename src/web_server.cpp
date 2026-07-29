@@ -8,7 +8,6 @@
 
 #include <atomic>
 #include <cstring>
-#include <initializer_list>
 
 #include "heap.h"
 #include "ispindel.h"
@@ -18,6 +17,7 @@
 #include "tilt_encoding.h"
 #include "version.h"
 #include "web_assets.h"
+#include "web_support.h"
 
 namespace {
 constexpr uint16_t kHttpPort = 80;
@@ -295,19 +295,6 @@ void handleTiltPatch(AsyncWebServerRequest* request, const size_t index,
   finishResponse(request, response);
 }
 
-// Rejected rather than clamped, unlike the numeric fields: there is no sensible
-// nearest-valid-URL to snap to, and silently dropping the edit would leave the
-// box showing something the device is not using.
-const char* urlProblem(const char* url) {
-  if (url[0] == '\0') {
-    return nullptr;  // Empty is how a slot is left unconfigured.
-  }
-  if (strncmp(url, "http://", 7) == 0 || strncmp(url, "https://", 8) == 0) {
-    return nullptr;
-  }
-  return "URL must start with http:// or https://";
-}
-
 void handleIspindelPatch(AsyncWebServerRequest* request, const size_t index,
                          const JsonVariant& body) {
   if (index >= kIspindelCount) {
@@ -386,8 +373,9 @@ std::atomic<bool> gOtaStarted{false};
 std::atomic<const char*> gOtaError{nullptr};
 
 // When the last upload chunk arrived, so a transfer that dies mid-flight can be
-// given up on. Only meaningful while gOtaActive.
-std::atomic<unsigned long> gOtaLastChunkMs{0};
+// given up on. Only meaningful while gOtaActive. Fixed-width to match
+// otaStalled(), which is explicit about it for portability reasons.
+std::atomic<uint32_t> gOtaLastChunkMs{0};
 
 // Serialises access to the global Update object across the two tasks that touch
 // it: chunks arrive on the AsyncTCP task, while the stall timeout below runs on
@@ -522,46 +510,9 @@ void handleUploadDone(AsyncWebServerRequest* request) {
   requestDeferred(PendingAction::Restart);
 }
 
-// Streams an embedded asset straight out of flash, a TCP buffer at a time.
-//
-// The obvious call, beginResponse(200, type, body), looks like it reads the
-// PROGMEM directly -- and it does read it, but AsyncBasicResponse stores the
-// body in a String (WebResponses.cpp: `_content = content`), so serving app.js
-// asks the allocator for one contiguous multi-kilobyte block per request,
-// against a largest free block that /api/state now reports. Once that
-// allocation fails the request simply hangs with no response, while small
-// endpoints like /api/state carry on working -- which is what made it look
-// like the server was crashing rather than running out of room. It also got
-// steadily worse as the page grew.
-//
-// The filler copies ~1.4 KB at a time into the buffer the stack already owns,
-// so the cost no longer scales with the size of the asset.
-// A page assembled from several flash strings, served as one response.
-//
-// The parts exist so the stylesheet is stored once and still emitted into both
-// pages: the alternative, a literal copy in each, costs ~6 KB of flash on a
-// build already at 90% of its slot.
-constexpr size_t kMaxAssetParts = 5;
-struct Asset {
-  const char* parts[kMaxAssetParts];
-  size_t lengths[kMaxAssetParts];
-  size_t count;
-  size_t total;
-};
-
-Asset makeAsset(std::initializer_list<const char*> parts) {
-  Asset asset = {};
-  for (const char* part : parts) {
-    if (asset.count >= kMaxAssetParts) {
-      break;
-    }
-    asset.parts[asset.count] = part;
-    asset.lengths[asset.count] = strlen(part);
-    asset.total += asset.lengths[asset.count];
-    ++asset.count;
-  }
-  return asset;
-}
+// Asset, makeAsset() and the chunk filler live in lib/web_support so they can
+// be tested; see that header for why the parts exist and why makeAsset() is a
+// template.
 
 // Streams an embedded asset straight out of flash, a TCP buffer at a time.
 //
@@ -588,22 +539,7 @@ void sendAsset(AsyncWebServerRequest* request, const char* type,
   const Asset* a = &asset;
   AsyncWebServerResponse* response = request->beginResponse(
       type, asset.total, [a](uint8_t* buffer, size_t maxLen, size_t index) -> size_t {
-        // Walk to the part holding this offset. The library accumulates what we
-        // return and passes it back as index, so a short fill at a part
-        // boundary is picked up correctly on the next call.
-        size_t offset = index;
-        size_t part = 0;
-        while (part < a->count && offset >= a->lengths[part]) {
-          offset -= a->lengths[part];
-          ++part;
-        }
-        if (part >= a->count) {
-          return 0;
-        }
-        const size_t remaining = a->lengths[part] - offset;
-        const size_t chunk = remaining < maxLen ? remaining : maxLen;
-        memcpy(buffer, a->parts[part] + offset, chunk);
-        return chunk;
+        return assetChunk(*a, buffer, maxLen, index);
       });
   response->addHeader("Cache-Control", "no-cache");
   finishResponse(request, response);
@@ -692,7 +628,7 @@ void webServerLoop() {
   // it is set, loop() stops the radio every pass. Left alone the device stays
   // silent until someone power cycles it, which is a poor way to find out an
   // update failed on a device that is not in the room.
-  // Read the timestamp *before* sampling the clock, and compare signed.
+  // Read the timestamp *before* sampling the clock.
   //
   // Written the other way round -- millis() - gOtaLastChunkMs -- this aborted
   // healthy uploads. The two are read on different tasks: loop() would sample
@@ -704,11 +640,12 @@ void webServerLoop() {
   //
   // Sampling the stamp first means a chunk arriving mid-check can only make the
   // measured silence *older* than reality, by the microseconds between the two
-  // reads, which cannot manufacture a 15 second gap. The signed cast then keeps
-  // a wrapped or future-dated value small and negative instead of enormous.
-  const unsigned long lastChunkMs = gOtaLastChunkMs.load();
-  const long silentMs = static_cast<long>(millis() - lastChunkMs);
-  if (gOtaActive && silentMs > static_cast<long>(kOtaStallMs)) {
+  // reads, which cannot manufacture a 15 second gap. otaStalled() then reads
+  // the difference as signed, which keeps a wrapped or future-dated value small
+  // and negative instead of enormous.
+  const uint32_t lastChunkMs = gOtaLastChunkMs.load();
+  const uint32_t nowMs = millis();
+  if (gOtaActive && otaStalled(nowMs, lastChunkMs, kOtaStallMs)) {
     // Under the lock, so this cannot land in the middle of an Update.write() on
     // the AsyncTCP task. On a genuinely stalled transfer that task is idle and
     // the take is uncontended; if a late chunk is being written right now, this
@@ -720,7 +657,7 @@ void webServerLoop() {
       gOtaError = "Upload stalled";
       updateUnlock();
       Serial.printf("OTA: upload stalled for %ld ms, aborted -- advertising resumes\n",
-                    silentMs);
+                    static_cast<long>(static_cast<int32_t>(nowMs - lastChunkMs)));
     }
   }
 
@@ -763,8 +700,8 @@ bool webServerBegin() {
   // for them -- the favicon link in each page is a data: URI for the same
   // reason, since a 404 still costs a whole connection to deliver.
   static const Asset indexPage =
-      makeAsset({kIndexHead, kStyleCss, kIndexMid, kAppJs, kIndexTail});
-  static const Asset otaPage = makeAsset({kOtaHead, kStyleCss, kOtaTail});
+      makeAsset(kIndexHead, kStyleCss, kIndexMid, kAppJs, kIndexTail);
+  static const Asset otaPage = makeAsset(kOtaHead, kStyleCss, kOtaTail);
 
   gServer.on("/", HTTP_GET, [](AsyncWebServerRequest* request) {
     sendAsset(request, "text/html", indexPage);

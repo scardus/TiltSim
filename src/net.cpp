@@ -108,8 +108,13 @@ const String& netHostname() {
     BleAddress mac;
     efuseMacBytes(ESP.getEfuseMac(), mac);
     char buffer[24];
-    snprintf(buffer, sizeof(buffer), "tiltsim-%02x%02x%02x", mac[3], mac[4],
-             mac[5]);
+    // Cast explicitly: %x is defined against unsigned int, and the default
+    // argument promotion on a uint8_t produces a signed int. Harmless in
+    // practice for values this small, but it is the one medium-severity thing
+    // cppcheck finds in the project and the CI gate is set at that level.
+    snprintf(buffer, sizeof(buffer), "tiltsim-%02x%02x%02x",
+             static_cast<unsigned>(mac[3]), static_cast<unsigned>(mac[4]),
+             static_cast<unsigned>(mac[5]));
     gHostname = buffer;
   }
   return gHostname;
