@@ -72,8 +72,7 @@ sending — 20 °C is the same 68 °F to the device, and the card's on-air capti
 still shows the raw `major`/`minor` going over the wire.
 
 Variance is also entered in real units, so ±2 °F means ±2 °F whether or not Pro
-is enabled. (Before v0.2.0 the Pro emulation was a hand-scaled row in the source
-and the variance was applied *after* scaling, so a Pro only wandered ±0.2 °F.)
+is enabled.
 
 ## How advertising works
 
@@ -88,11 +87,11 @@ simulator matches the *reading* cadence but not the duty cycle:
   an 800 ms rotation; all eight make 1.6 s.
 
 The rotation is the deliberate departure. A receiver that builds its list of
-devices per scan can only list a colour it actually heard inside that window,
-and the HM-10 used downstream defaults to a 3 s scan — so one 5 s-spaced burst
-per colour was missed more often than not, which is what made colours appear to
-alternate exclusively. Re-airing each colour every couple of hundred
-milliseconds puts all of them inside any 3 s window. One radio cannot advertise
+devices per scan can only list a colour it actually hears inside that window,
+and the HM-10 used downstream defaults to a 3 s scan, so one 5 s-spaced burst
+per colour is missed more often than not — which reads as colours alternating
+exclusively. Re-airing each colour every couple of hundred milliseconds puts all
+of them inside any 3 s window. One radio cannot advertise
 eight addresses at once (concurrent advertising sets need BLE 5.0 extended
 advertising, and the classic ESP32 is 4.2 silicon), so the duty cycle is what
 gets traded.
@@ -108,16 +107,12 @@ a beacon, and nothing can open a connection to it and take the radio away
 mid-rotation. The flags byte is `0x1A`, so a full advertisement begins
 `02 01 1A 1A FF 4C 00 02 15 …` — the canonical iBeacon layout.
 
-The BLE stack is **NimBLE**, not the Bluedroid-based library bundled with the
-Arduino core. Bluedroid was 726 KB of a 1.77 MB image and held tens of
-kilobytes of heap; swapping it out took the image from 90.3% of the app slot to
-60.3%, and took the largest contiguous heap block on an idle device from 43 KB
-to 110 KB. The advertisement itself is unchanged — same 30 bytes, same
-`ADV_SCAN_IND`, same per-colour static random addresses — because the bytes
-were already assembled by hand and are handed to the controller raw either way.
-The one thing that is not a rename is the address byte order: Bluedroid takes
-the six bytes most significant first, NimBLE least significant first, so
-`bleAddressLittleEndian()` sits between the two and is pinned by a test.
+The BLE stack is **NimBLE**, rather than the Bluedroid-based library bundled
+with the Arduino core; it leaves an idle device about 110 KB of contiguous heap
+and the image at 68% of its app slot. The 30 advertisement bytes are assembled
+by hand and handed to the controller raw. NimBLE takes a BLE address least
+significant byte first, so `bleAddressLittleEndian()` reverses the six bytes on
+the way in, and a test pins the on-air order.
 
 ## iSpindel emulation
 
@@ -158,29 +153,21 @@ Some details worth knowing:
 - **`https://` works, but certificates are not validated.** Real iSpindel and
   Gravitymon firmware does the same: there is nowhere to keep a trust store and
   no clock to check validity against. A machine on the path could read or alter
-  the readings. The handshake needs about 37 KB of contiguous heap while it runs,
-  which is affordable now and was not before the NimBLE migration.
+  the readings. The handshake needs about 37 KB of contiguous heap while it runs.
 - **Posting happens on its own FreeRTOS task.** `HTTPClient` is blocking, and a
   dead endpoint would otherwise stall the BLE rotation for as long as it took to
   time out. The task is only created once a slot has an endpoint, and its 16 KB
-  stack comes from the heap — an earlier version put that array in `.bss` and
-  called it free, which is inverted: `.bss` and the heap are the same DRAM.
+  stack comes from the heap rather than a static array: `.bss` and the heap are
+  the same DRAM, so a static buffer would not be free.
 
 ## Staying connected
 
 This device is expected to be headless, mains-powered and out of reach, so a
 power cut must not need a human. Boot makes three connect attempts of ten
 seconds each rather than the single sixty-second attempt WiFiManager does by
-default, and **the web server starts whether or not any of them worked**. That
+default, and **the web server starts whether or not any of them succeed**. That
 second part is the one that matters: the bind is retried from the main loop, so
 the admin page comes back on its own when the link does.
-
-It used to be fatal instead. Measured over eighteen hard resets on the bench
-board, nine failed to associate — and because the web server was only started
-when the first attempt succeeded, every one of those nine left the device
-associated a half-minute later, pingable, advertising happily, with nothing
-listening on port 80 until somebody power-cycled it. Twenty-two of twenty-two
-boots came back after the change.
 
 When the link is down `netLoop()` retries every 30 s. After four of those, about
 two minutes, the setup portal goes up for two minutes, and then the device goes
@@ -203,8 +190,7 @@ for one SSID here, and a weak link is either a near AP fading or an association
 with a distant one — the RSSI alone cannot tell those apart. Note that *which*
 AP gets picked is not controllable from here: `WiFi.setScanMethod()` is not read
 by the no-argument `WiFi.begin()` that WiFiManager connects through, so setting
-it does nothing at all. It was measured, and it is a dead end rather than an
-oversight.
+it has no effect. There is nothing useful to configure.
 
 ## Firmware updates
 
@@ -245,35 +231,29 @@ dragging in `main.cpp`.
 
 The payload is assembled in `buildIBeaconPayload()` rather than with the
 framework's `BLEBeacon` class, deliberately. `BLEBeacon` byte-swaps every 16-bit
-setter, so `setManufacturerId(0x004C)` actually advertises company ID `0x4C00` —
-which is not Apple. That bug shipped here for a while, and because the payload
-was built inside `main.cpp` no test could see it. Building the bytes in a pure
-function keeps the on-air order pinned by `test_payload_matches_reference_byte_for_byte`.
+setter, so `setManufacturerId(0x004C)` advertises company ID `0x4C00` — which is
+not Apple. Building the bytes in a pure function instead keeps the on-air order
+pinned by `test_payload_matches_reference_byte_for_byte`.
 
 Two things in `platformio.ini` are worth knowing:
 
-- `board_build.partitions = min_spiffs.csv`. This was once forced: Bluedroid
-  alone filled 85% of the default 1.25 MB app slot. Both slots are 1.875 MB and
-  the image uses 68% of one — the iSpindel side costs about 154 KB of that,
-  almost all of it mbedTLS, because `HTTPClient.h` includes
-  `WiFiClientSecure.h` unconditionally and links the whole TLS stack whether or
-  not it is used. That is also why `https://` is supported rather than refused:
-  the flash was already spent. Changing the partition table cannot be done over
-  OTA, so it stays regardless.
+- `board_build.partitions = min_spiffs.csv`. Both OTA slots are 1.875 MB and the
+  image uses 68% of one — the iSpindel side costs about 154 KB of that, almost
+  all of it mbedTLS, because `HTTPClient.h` includes `WiFiClientSecure.h`
+  unconditionally and links the whole TLS stack whether or not it is used. That
+  is also why `https://` is supported rather than refused: the flash is already
+  spent. Changing the partition table cannot be done over OTA, so it stays
+  regardless.
 - The three `CONFIG_BT_NIMBLE_ROLE_*=0` flags. This is a broadcaster and
   nothing else, so the client, scan and server roles are not compiled in. Note
   the names: the library's docs give a `MYNEWT_VAL_BLE_ROLE_*` spelling, which
   on the ESP port is derived from these and therefore loses to them silently.
 
-Keep this checkout out of OneDrive, or any other sync client that does
-on-demand placeholder files. There used to be a `libdeps_dir` here pointing the
-dependencies outside the project, because OneDrive dehydrates freshly-extracted
-package files, SCons then reads a null mtime, and the build dies with
-`unsupported operand type(s) for -: 'float' and 'NoneType'` — most visibly on
-the Unity package that `pio test` installs. That workaround expanded a
-Windows-only environment variable, which made the project unbuildable anywhere
-else, CI included. Moving the checkout out of the synced tree fixes the cause
-instead of the symptom.
+Keep this checkout out of OneDrive, and out of any sync client that uses
+on-demand placeholder files. Such a client dehydrates freshly-extracted package
+files; SCons then reads a null mtime and the build dies with
+`unsupported operand type(s) for -: 'float' and 'NoneType'`, most visibly on the
+Unity package that `pio test` installs.
 
 ### Layout
 
@@ -306,9 +286,9 @@ follow, and breaking either one is a real fault rather than a style point:
   overload copies the body into a `String`, so a 9 KB page needs a 9 KB
   contiguous allocation — and `/api/state` reports the largest free block a
   running device can actually offer. Serve assets through `sendProgmem()`, which
-  streams them from flash a TCP buffer at a time. When this was got wrong the
-  symptom was not an error but the large pages hanging with no response while
-  the small endpoints kept working, which reads as a crashing server.
+  streams them from flash a TCP buffer at a time. Getting this wrong does not
+  raise an error: the large pages hang with no response while the small
+  endpoints keep working, which reads as a crashing server.
 
 ## HTTP API
 
