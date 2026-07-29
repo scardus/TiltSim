@@ -264,10 +264,16 @@ Two things in `platformio.ini` are worth knowing:
   nothing else, so the client, scan and server roles are not compiled in. Note
   the names: the library's docs give a `MYNEWT_VAL_BLE_ROLE_*` spelling, which
   on the ESP port is derived from these and therefore loses to them silently.
-- `libdeps_dir` points outside the project. This tree lives under OneDrive,
-  which dehydrates freshly-extracted package files; SCons then reads a null
-  mtime and the build fails with `unsupported operand type(s) for -: 'float'
-  and 'NoneType'`.
+
+Keep this checkout out of OneDrive, or any other sync client that does
+on-demand placeholder files. There used to be a `libdeps_dir` here pointing the
+dependencies outside the project, because OneDrive dehydrates freshly-extracted
+package files, SCons then reads a null mtime, and the build dies with
+`unsupported operand type(s) for -: 'float' and 'NoneType'` — most visibly on
+the Unity package that `pio test` installs. That workaround expanded a
+Windows-only environment variable, which made the project unbuildable anywhere
+else, CI included. Moving the checkout out of the synced tree fixes the cause
+instead of the symptom.
 
 ### Layout
 
