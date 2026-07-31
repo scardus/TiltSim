@@ -45,6 +45,72 @@ void test_payload_has_every_field_a_receiver_expects() {
   TEST_ASSERT_EQUAL_INT(-12, doc["RSSI"].as<int>());
 }
 
+void test_standard_payload_has_no_gravitymon_fields() {
+  // reading.extended defaults to false when omitted from the aggregate init,
+  // same as every call site above -- this is the plain iSpindel format, and it
+  // must stay exactly what it was before Gravitymon support existed.
+  char body[kBodyLen];
+  const IspindelReading reading = {"gravmon", "2E6753", 68.0f, 1.005f};
+  TEST_ASSERT_TRUE(buildIspindelJson(reading, body, sizeof(body)) > 0);
+
+  JsonDocument doc;
+  deserializeJson(doc, body);
+  TEST_ASSERT_FALSE(doc["corr-gravity"].is<float>());
+  TEST_ASSERT_FALSE(doc["gravity-unit"].is<const char*>());
+  TEST_ASSERT_FALSE(doc["run-time"].is<int>());
+}
+
+void test_extended_payload_adds_gravitymon_fields_in_sg() {
+  char body[kBodyLen];
+  IspindelReading reading = {"gravmon", "2E6753", 68.0f, 1.005f};
+  reading.extended = true;
+  reading.plato = false;
+  TEST_ASSERT_TRUE(buildIspindelJson(reading, body, sizeof(body)) > 0);
+
+  JsonDocument doc;
+  TEST_ASSERT_EQUAL(DeserializationError::Ok, deserializeJson(doc, body).code());
+  TEST_ASSERT_FLOAT_WITHIN(0.0001f, 1.005f, doc["gravity"].as<float>());
+  TEST_ASSERT_FLOAT_WITHIN(0.0001f, 1.005f, doc["corr-gravity"].as<float>());
+  TEST_ASSERT_EQUAL_STRING("G", doc["gravity-unit"]);
+  TEST_ASSERT_EQUAL_INT(6, doc["run-time"].as<int>());
+}
+
+void test_extended_plato_converts_gravity_and_corr_gravity() {
+  // 1.050 SG is the standard reference point for this cubic: real Gravitymon
+  // (and every other brewing SG/Plato table) puts it at ~12.4 degP.
+  char body[kBodyLen];
+  IspindelReading reading = {"gravmon", "2E6753", 68.0f, 1.050f};
+  reading.extended = true;
+  reading.plato = true;
+  TEST_ASSERT_TRUE(buildIspindelJson(reading, body, sizeof(body)) > 0);
+
+  JsonDocument doc;
+  TEST_ASSERT_EQUAL(DeserializationError::Ok, deserializeJson(doc, body).code());
+  TEST_ASSERT_FLOAT_WITHIN(0.05f, 12.39f, doc["gravity"].as<float>());
+  TEST_ASSERT_FLOAT_WITHIN(0.05f, 12.39f, doc["corr-gravity"].as<float>());
+  TEST_ASSERT_EQUAL_STRING("P", doc["gravity-unit"]);
+}
+
+void test_plato_is_ignored_outside_extended_mode() {
+  // A stale plato=true left over from a previous Extended session must not
+  // leak into the plain iSpindel format if Extended is switched back off.
+  char body[kBodyLen];
+  IspindelReading reading = {"gravmon", "2E6753", 68.0f, 1.005f};
+  reading.extended = false;
+  reading.plato = true;
+  TEST_ASSERT_TRUE(buildIspindelJson(reading, body, sizeof(body)) > 0);
+
+  JsonDocument doc;
+  deserializeJson(doc, body);
+  TEST_ASSERT_FLOAT_WITHIN(0.0001f, 1.005f, doc["gravity"].as<float>());
+  TEST_ASSERT_FALSE(doc["gravity-unit"].is<const char*>());
+}
+
+void test_sg_to_plato_matches_the_reference_conversion() {
+  TEST_ASSERT_FLOAT_WITHIN(0.05f, 0.0f, sgToPlato(1.000f));
+  TEST_ASSERT_FLOAT_WITHIN(0.05f, 12.39f, sgToPlato(1.050f));
+}
+
 void test_temperature_is_always_fahrenheit() {
   // The device stores and posts degF and converts only for display. If this
   // ever flipped, every logged reading would be wrong by the C/F offset while
@@ -157,6 +223,11 @@ void test_id_rejects_bad_input() {
 
 static void runAllTests() {
   RUN_TEST(test_payload_has_every_field_a_receiver_expects);
+  RUN_TEST(test_standard_payload_has_no_gravitymon_fields);
+  RUN_TEST(test_extended_payload_adds_gravitymon_fields_in_sg);
+  RUN_TEST(test_extended_plato_converts_gravity_and_corr_gravity);
+  RUN_TEST(test_plato_is_ignored_outside_extended_mode);
+  RUN_TEST(test_sg_to_plato_matches_the_reference_conversion);
   RUN_TEST(test_temperature_is_always_fahrenheit);
   RUN_TEST(test_name_with_json_metacharacters_is_escaped);
   RUN_TEST(test_payload_refuses_to_truncate);

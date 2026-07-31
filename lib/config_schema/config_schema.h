@@ -36,6 +36,8 @@ constexpr size_t kIspindelUrlLen = 128;
 // NVS as one blob and a heap pointer would not survive the round trip.
 struct IspindelSettings {
   bool enabled;
+  bool extended;   // send the extended Gravitymon field set instead of plain iSpindel
+  bool plato;      // gravity-unit is Plato instead of SG; only honoured when extended
   char name[kIspindelNameLen];
   char url[kIspindelUrlLen];
   float tempF;            // real degrees F, as for the tilts
@@ -53,7 +55,9 @@ struct AppConfig {
 
 // Bump the low byte whenever the layout of AppConfig changes; a mismatch makes
 // the device fall back to defaults rather than read a stale struct.
-// TIL2 added the iSpindel slots.
+// TIL2 added the iSpindel slots. TIL3 added extended/plato to IspindelSettings,
+// which left sizeof(IspindelSettings) unchanged (padding absorbed the two new
+// bools) but moved name/url -- exactly the case the paragraph below warns about.
 //
 // configBegin() also checks the stored blob's size, which catches a field being
 // added or removed. What it cannot catch is a change that leaves sizeof alone --
@@ -62,7 +66,7 @@ struct AppConfig {
 // every value silently belongs to a different field. test_config_schema pins the
 // offsets against this constant for that reason: change one, and it tells you to
 // change the other.
-constexpr uint32_t kConfigMagic = 0x54494C32;  // "TIL2"
+constexpr uint32_t kConfigMagic = 0x54494C33;  // "TIL3"
 
 // Value limits, enforced server-side on every write.
 constexpr float kMinTempF = -40.0f;

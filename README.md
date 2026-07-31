@@ -120,7 +120,9 @@ Four iSpindel / Gravitymon slots sit below the Tilts on the same page. Each has
 a name, an endpoint to post to, and the same temperature, gravity and variance
 controls as a Tilt. There is no Pro switch — that is a Tilt distinction.
 
-Every 15 minutes each enabled slot with an endpoint POSTs a JSON body:
+Every 15 minutes each enabled slot with an endpoint POSTs a JSON body. Two
+formats are available per slot, chosen with the **Standard / Extended**
+toggle:
 
 ```json
 { "name": "ispindel-1", "ID": "C2CC7C", "token": "gravmon", "interval": 900,
@@ -133,6 +135,24 @@ Only `name`, `ID`, `temperature` and `gravity` mean anything. `token`, `angle`,
 tilt angle or a link budget, and inventing plausible movement for them would
 make the simulation look more faithful than it is. They live as named constants
 in `lib/ispindel_encoding/`.
+
+**Extended mode** adds the Gravitymon field set — `corr-gravity`,
+`gravity-unit` and `run-time` — and unlocks a further **SG / Plato** toggle. A
+plain iSpindel has no field to say which unit `gravity` is in, so a receiver
+has to guess; Gravitymon always computes SG internally and, on request,
+converts to Plato for output, declaring which one it sent:
+
+```json
+{ "...": "as above", "corr-gravity": 1.0500, "gravity-unit": "G", "run-time": 6 }
+```
+
+Selecting Plato genuinely converts `gravity` and `corr-gravity` to degrees
+Plato (the standard cubic approximation, `sgToPlato()` in
+`lib/ispindel_encoding/`) and sets `gravity-unit` to `"P"` — it is not just a
+label swap. The card's own Gravity field switches units to match, the same way
+the page-wide °F/°C toggle already does for temperature, converting back to SG
+before saving. `corr-gravity` always equals `gravity` here: nothing in this
+simulator models the temperature-correction curve a real Gravitymon applies.
 
 Some details worth knowing:
 

@@ -25,6 +25,11 @@ static_assert(kIspindelCount <= 4,
               "ispindelId packs the slot index into the low 2 bits of the last "
               "MAC byte; more than 4 slots would make two IDs collide");
 
+float sgToPlato(const float sg) {
+  return -616.868f + 1111.14f * sg - 630.272f * sg * sg +
+         135.997f * sg * sg * sg;
+}
+
 size_t buildIspindelJson(const IspindelReading& reading, char* out,
                          const size_t outLen) {
   if (out == nullptr || outLen == 0) {
@@ -45,10 +50,23 @@ size_t buildIspindelJson(const IspindelReading& reading, char* out,
   doc["interval"] = kIspindelIntervalSec;
   doc["temperature"] = reading.tempF;
   doc["temp_units"] = kIspindelTempUnits;
-  doc["gravity"] = reading.gravity;
+
+  // Plato only applies in the extended set: the plain iSpindel format has
+  // nowhere to declare which unit gravity is in, so it always stays SG.
+  const bool asPlato = reading.extended && reading.plato;
+  const float gravityOut = asPlato ? sgToPlato(reading.gravity) : reading.gravity;
+  doc["gravity"] = gravityOut;
   doc["angle"] = kPlaceholderAngle;
   doc["battery"] = kPlaceholderBattery;
   doc["RSSI"] = kPlaceholderRssi;
+
+  if (reading.extended) {
+    // No temperature-correction curve is modelled, so the "corrected" value is
+    // the same one gravity already holds.
+    doc["corr-gravity"] = gravityOut;
+    doc["gravity-unit"] = asPlato ? "P" : "G";
+    doc["run-time"] = kPlaceholderRunTimeSec;
+  }
 
   // measureJson excludes the terminator, so a body that exactly fills the
   // buffer still needs one byte more than it reports.

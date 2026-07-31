@@ -116,6 +116,8 @@ void addIspindelJson(JsonObject obj, const size_t index,
   obj["name"] = ispindel.name;
   obj["url"] = ispindel.url;
   obj["enabled"] = ispindel.enabled;
+  obj["extended"] = ispindel.extended;
+  obj["plato"] = ispindel.plato;
   obj["tempF"] = ispindel.tempF;
   obj["gravity"] = ispindel.gravity;
   obj["tempVarianceF"] = ispindel.tempVarianceF;
@@ -322,6 +324,12 @@ void handleIspindelPatch(AsyncWebServerRequest* request, const size_t index,
   IspindelSettings& ispindel = gConfig.ispindels[index];
   if (body["enabled"].is<bool>()) {
     ispindel.enabled = body["enabled"].as<bool>();
+  }
+  if (body["extended"].is<bool>()) {
+    ispindel.extended = body["extended"].as<bool>();
+  }
+  if (body["plato"].is<bool>()) {
+    ispindel.plato = body["plato"].as<bool>();
   }
   if (body["name"].is<const char*>()) {
     strlcpy(ispindel.name, body["name"].as<const char*>(), sizeof(ispindel.name));

@@ -270,6 +270,20 @@ const f2cDelta=d=>d*5/9, c2fDelta=d=>d*9/5;
 let units=localStorage.getItem('units')==='C'?'C':'F';
 const isC=()=>units==='C';
 
+// SG/Plato for iSpindel cards in extended+Plato mode. Mirrors sgToPlato() in
+// lib/ispindel_encoding exactly, so the number shown here is the number that
+// goes out on the wire. Plato is not linear in SG, unlike F/C, so there is no
+// closed-form inverse -- platoToSg() runs a few rounds of Newton's method
+// instead, which converges quickly since the slope (platoScale) never changes
+// sign across the 0.9-2.0 SG range this device allows.
+const sgToPlato=sg=>-616.868+1111.14*sg-630.272*sg*sg+135.997*sg*sg*sg;
+const platoScale=sg=>1111.14-1260.544*sg+407.991*sg*sg;
+const platoToSg=p=>{
+  let sg=1.040;
+  for(let i=0;i<8;i++)sg-=(sgToPlato(sg)-p)/platoScale(sg);
+  return sg;
+};
+
 // The name and URL are user text dropped into an innerHTML template, so a quote
 // in either would otherwise break out of the value attribute.
 const esc=s=>String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;')
@@ -313,6 +327,11 @@ function card(t,i){
 function icard(s,i){
   const c=document.createElement('div');
   c.className='card'+(s.enabled?'':' off');
+  // Only the wire payload has to carry Plato -- see buildIspindelJson() -- but
+  // showing "Gravity SG" while a Plato number sat underneath it read as a bug
+  // rather than a feature, so the field itself switches too.
+  const showPlato=s.extended&&s.plato;
+  const gScale=platoScale(s.gravity);
   // .card draws its left edge from --sw. Without one set the border computes to
   // nothing, so iSpindels borrow the accent colour rather than a swatch.
   c.style.setProperty('--sw','var(--accent)');
@@ -330,6 +349,22 @@ function icard(s,i){
     <div><label>Post to</label><input type="text" data-f="url" maxlength="127"
       placeholder="http://192.168.0.20:8080/ispindel" value="${esc(s.url)}"></div>
   </div>
+  <div class="row one">
+    <div><label>Format</label>
+      <div class="seg" data-f="extended">
+        <button type="button" class="${s.extended?'':'on'}" data-v="false">Standard</button>
+        <button type="button" class="${s.extended?'on':''}" data-v="true">Extended</button>
+      </div>
+    </div>
+  </div>
+  ${s.extended?`<div class="row one">
+    <div><label>Gravity unit</label>
+      <div class="seg" data-f="plato">
+        <button type="button" class="${s.plato?'':'on'}" data-v="false">SG</button>
+        <button type="button" class="${s.plato?'on':''}" data-v="true">Plato</button>
+      </div>
+    </div>
+  </div>`:''}
   <div class="row">
     <div><label>Temperature °${units}</label><input type="number" data-f="tempF"
       step="${isC()?0.1:1}" min="-40" max="${isC()?121.1:250}"
@@ -339,14 +374,23 @@ function icard(s,i){
       value="${(isC()?f2cDelta(s.tempVarianceF):s.tempVarianceF).toFixed(1)}"></div>
   </div>
   <div class="row">
-    <div><label>Gravity SG</label><input type="number" data-f="gravity"
-      step="0.001" min="0.9" max="2" value="${s.gravity.toFixed(3)}"></div>
-    <div><label>Variance ±SG</label><input type="number" data-f="gravityVariance"
-      step="0.0001" min="0" max="0.1" value="${s.gravityVariance.toFixed(4)}"></div>
+    <div><label>Gravity ${showPlato?'°Plato':'SG'}</label><input type="number" data-f="gravity"
+      data-plato="${showPlato}"
+      step="${showPlato?0.1:0.001}" min="${showPlato?sgToPlato(0.9).toFixed(1):0.9}"
+      max="${showPlato?sgToPlato(2).toFixed(1):2}"
+      value="${(showPlato?sgToPlato(s.gravity):s.gravity).toFixed(showPlato?1:3)}"></div>
+    <div><label>Variance ±${showPlato?'°Plato':'SG'}</label><input type="number" data-f="gravityVariance"
+      data-plato="${showPlato}" data-basesg="${s.gravity}"
+      step="${showPlato?0.01:0.0001}" min="0" max="${showPlato?(0.1*gScale).toFixed(2):0.1}"
+      value="${(showPlato?s.gravityVariance*gScale:s.gravityVariance).toFixed(showPlato?2:4)}"></div>
   </div>
-  <div class="wire">posts as <b>${s.id}</b> every 15 min · always °F on the wire</div>`;
+  <div class="wire">posts as <b>${s.id}</b> every 15 min ·
+    ${s.extended?'extended Gravitymon format · gravity as '+(s.plato?'Plato':'SG'):'standard iSpindel format'}
+    · always °F on the wire</div>`;
 
   wire(c,'ispindel',i);
+  wireSeg(c,'ispindel',i,'extended');
+  wireSeg(c,'ispindel',i,'plato');
   return c;
 }
 
@@ -362,8 +406,29 @@ function wire(c,kind,i){
       // The device stores degF, so convert back out of the display units.
       if(isC()&&f==='tempF')v=c2f(v);
       if(isC()&&f==='tempVarianceF')v=c2fDelta(v);
+      // Same idea for gravity: the device always stores SG, so a card showing
+      // Plato (data-plato, set in icard()) has to convert back before saving.
+      if(el.dataset.plato==='true'){
+        if(f==='gravity')v=platoToSg(v);
+        if(f==='gravityVariance')v=v/platoScale(parseFloat(el.dataset.basesg));
+      }
       send(kind,i,{[f]:v});
     });
+  });
+}
+
+// Per-card segmented controls (Standard/Extended, SG/Plato) are not <input>
+// elements, so they fall outside wire()'s generic data-f handling and get
+// their own small wiring function. Neither state is "off", so a boolean
+// checkbox would not say which side is active -- same reasoning as the global
+// °F/°C control this borrows its look from -- but that one is wired once,
+// globally, by hand; this one is per-card and rebuilt on every render(), so it
+// is wired fresh each time a card is built rather than bound once.
+function wireSeg(c,kind,i,field){
+  const seg=c.querySelector(`.seg[data-f="${field}"]`);
+  if(!seg)return;
+  seg.querySelectorAll('button').forEach(btn=>{
+    btn.addEventListener('click',()=>send(kind,i,{[field]:btn.dataset.v==='true'}));
   });
 }
 

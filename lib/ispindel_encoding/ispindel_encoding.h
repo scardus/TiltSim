@@ -30,6 +30,11 @@ constexpr float kPlaceholderAngle = 45.34f;
 constexpr float kPlaceholderBattery = 3.67f;
 constexpr int kPlaceholderRssi = -12;
 
+// Seconds the device was "awake" before posting. Only sent in the extended
+// Gravitymon field set; like the other placeholders above, nothing here
+// models an actual wake/sleep cycle.
+constexpr int kPlaceholderRunTimeSec = 6;
+
 // Temperatures always go out in Fahrenheit, so temp_units is always "F".
 //
 // A real iSpindel can be configured either way, but the simulator stores degF
@@ -57,10 +62,31 @@ struct IspindelReading {
   const char* id;
   float tempF;
   float gravity;
+  // When false, the payload is plain iSpindel -- no gravity-unit field at all,
+  // gravity always SG. Left off an aggregate-init list, as the existing tests
+  // do, this value-initialises to false like any other omitted trailing
+  // aggregate member.
+  bool extended;
+  // Only honoured when extended is true; the plain iSpindel format has no
+  // field to declare it in.
+  bool plato;
 };
+
+// Converts a specific-gravity reading to degrees Plato, using the cubic
+// approximation real Gravitymon firmware applies when its own config is set
+// to Plato output (accurate over the usual brewing range, roughly 1.000-1.130
+// SG). Kept alongside the payload builder rather than in a general-purpose
+// units file because nothing else in this simulator needs Plato.
+float sgToPlato(float sg);
 
 // Serialises one reading into the JSON body a real device would POST. Returns
 // the number of characters written, or 0 if the buffer was too small -- in
 // which case out is left as an empty string rather than a truncated fragment,
 // since half a JSON document is worse than none.
+//
+// reading.extended switches between the plain iSpindel field set (unchanged
+// from before this existed) and the extended Gravitymon set, which adds
+// corr-gravity, gravity-unit and run-time. reading.plato, honoured only in
+// the extended case, converts gravity and corr-gravity to degrees Plato and
+// sets gravity-unit to "P" instead of "G".
 size_t buildIspindelJson(const IspindelReading& reading, char* out, size_t outLen);

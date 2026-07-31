@@ -64,6 +64,8 @@ void applyDefaults() {
   for (size_t i = 0; i < kIspindelCount; ++i) {
     IspindelSettings& ispindel = gConfig.ispindels[i];
     ispindel.enabled = false;
+    ispindel.extended = false;
+    ispindel.plato = false;
     snprintf(ispindel.name, sizeof(ispindel.name), "ispindel-%u",
              static_cast<unsigned>(i + 1));
     ispindel.url[0] = '\0';

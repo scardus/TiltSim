@@ -2,6 +2,7 @@
 
 #include <Arduino.h>
 #include <HTTPClient.h>
+#include <WiFiClient.h>
 #include <WiFiClientSecure.h>
 
 #include <atomic>
@@ -42,8 +43,9 @@ constexpr uint32_t kTaskStackBytes = 16384;
 constexpr UBaseType_t kTaskPriority = 1;
 
 // Room for the longest body this can produce: a full-length name escaped
-// character by character, plus the fixed fields.
-constexpr size_t kBodyLen = 384;
+// character by character, plus the fixed fields, plus the extended Gravitymon
+// fields (corr-gravity, gravity-unit, run-time) when that mode is on.
+constexpr size_t kBodyLen = 448;
 
 // Deliberately not a static stack in .bss. That looked free -- there is plenty
 // of static RAM spare -- but .bss and the heap come out of the same DRAM, so an
@@ -89,8 +91,10 @@ void sendBody(WiFiClient& client, const IspindelSettings& settings, char* body,
 
   const int status = http.POST(reinterpret_cast<uint8_t*>(body), strlen(body));
   if (status > 0) {
-    Serial.printf("iSpindel: %s -> %s %d  %.1f degF  %.4f SG\n", settings.name,
-                  settings.url, status, tempF, gravity);
+    const bool asPlato = settings.extended && settings.plato;
+    Serial.printf("iSpindel: %s -> %s %d  %.1f degF  %.4f %s\n", settings.name,
+                  settings.url, status, tempF,
+                  asPlato ? sgToPlato(gravity) : gravity, asPlato ? "P" : "SG");
   } else {
     // Negative codes are HTTPClient's own, not the server's; the string form is
     // the only way to tell a refused connection from a timeout.
@@ -109,7 +113,9 @@ void postOne(const size_t index, const IspindelSettings& settings) {
       settings.gravity + randomVariance(settings.gravityVariance);
 
   char body[kBodyLen];
-  const IspindelReading reading = {settings.name, gIds[index], tempF, gravity};
+  const IspindelReading reading = {settings.name,   gIds[index],
+                                    tempF,           gravity,
+                                    settings.extended, settings.plato};
   if (buildIspindelJson(reading, body, sizeof(body)) == 0) {
     Serial.printf("iSpindel: %s payload would not fit, skipped\n", settings.name);
     return;
