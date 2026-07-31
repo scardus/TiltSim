@@ -21,8 +21,8 @@
 void setUp() {}
 void tearDown() {}
 
-void test_config_magic_is_TIL2() {
-  TEST_ASSERT_EQUAL_HEX32(0x54494C32, kConfigMagic);
+void test_config_magic_is_TIL3() {
+  TEST_ASSERT_EQUAL_HEX32(0x54494C33, kConfigMagic);
 }
 
 void test_app_config_layout_is_pinned_to_the_magic() {
@@ -47,8 +47,10 @@ void test_app_config_layout_is_pinned_to_the_magic() {
 
   TEST_ASSERT_EQUAL_UINT32(180, sizeof(IspindelSettings));
   TEST_ASSERT_EQUAL_UINT32(0, offsetof(IspindelSettings, enabled));
-  TEST_ASSERT_EQUAL_UINT32(1, offsetof(IspindelSettings, name));
-  TEST_ASSERT_EQUAL_UINT32(33, offsetof(IspindelSettings, url));
+  TEST_ASSERT_EQUAL_UINT32(1, offsetof(IspindelSettings, extended));
+  TEST_ASSERT_EQUAL_UINT32(2, offsetof(IspindelSettings, plato));
+  TEST_ASSERT_EQUAL_UINT32(3, offsetof(IspindelSettings, name));
+  TEST_ASSERT_EQUAL_UINT32(35, offsetof(IspindelSettings, url));
   TEST_ASSERT_EQUAL_UINT32(164, offsetof(IspindelSettings, tempF));
   TEST_ASSERT_EQUAL_UINT32(168, offsetof(IspindelSettings, gravity));
   TEST_ASSERT_EQUAL_UINT32(172, offsetof(IspindelSettings, tempVarianceF));
@@ -209,7 +211,7 @@ void test_other_schemes_are_rejected() {
 }
 
 static void runAllTests() {
-  RUN_TEST(test_config_magic_is_TIL2);
+  RUN_TEST(test_config_magic_is_TIL3);
   RUN_TEST(test_app_config_layout_is_pinned_to_the_magic);
   RUN_TEST(test_tilt_values_in_range_are_left_alone);
   RUN_TEST(test_tilt_values_out_of_range_are_pulled_back);
