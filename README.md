@@ -1,4 +1,4 @@
-# Tilt Simulator: ESP32 Hydrometer Emulator
+# TiltSim: ESP32 based Tilt & iSpindel Hydrometer Emulator
 
 A PlatformIO project for the ESP32 that pretends to be up to eight Tilt
 hydrometers and four iSpindels at once, so brewing controllers can be tested
